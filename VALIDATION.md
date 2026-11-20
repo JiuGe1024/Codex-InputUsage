@@ -1,12 +1,12 @@
 # Codex InputUsage 验证记录
 
-更新于 2026-11-21。当前最新代码提交：`592f1dc`。
+更新于 2026-11-21。
 
 ## 已实测通过
 
 ### 1. 构建与零警告检查
 - 命令：`powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/Build-OverlayPrototype.ps1`
-- 结果：退出码 0，0 错误 0 警告，产物 `outputs/Codex-InputUsage-Overlay.exe`（124,416 字节）。
+- 结果：退出码 0，0 错误 0 警告，产物 `outputs/Codex-InputUsage-Overlay.exe`（138,240 字节）。
 
 ### 2. 路由与零猜测会话匹配（`--self-test`）
 - 单测结果：`match_tests pool=True header=True bodyTieBreak=True refuseAmbig=True disconnectClear=True`
@@ -23,6 +23,8 @@
   - 会话累计：`68,647,453`（原版 TokenBar：`68,647.45k`），累计缓存：`97.41%`（原版：`97.41%`）
   - TPS：修正后最近 6 轮稳定在 `40.9–50.2 tok/s`（最后一轮 `47 tok/s`，模型耗时 `43.7s` = 整轮 `45.9s` - 工具 `2.2s`），修复了旧口径遗漏工具调用参数生成耗时导致的 `350 tok/s` 虚高
   - 十通道上下文和：`271,654 == 官方 271,654`（`用户消息 87,226 / 模型回复 76,740 / 工具结果 74,370 / 系统提示词 16,532 / 系统工具 7,798 / 压缩摘要 5,824 / MCP 工具 2,082 / Skill 696 / 用户规则 386 / 子代理通知 0`）
+  - 会话均速与模型徽标：`avgTps = 32.3 tok/s`，`model = gpt-6.2-sol (medium)` -> 显示 `gpt-6.2-sol · 中`
+  - 账号级实时额度覆盖：解析旧对话 `01a1b9da` 时，`AccountQuotaReader` 自动从最新落盘的 `01a1f999` 提取账号实时额度（`5h 余 22% · 1m 后重置`，`周余 48% · 21h 2m 后重置`）
 
 ### 4. MCP 原生伴随启动握手
 - 执行 `scripts/Install-AutoStart.ps1`：已移除遗留 `HKCU\...\Run\CodexInputUsageOverlay`，写入 `~/.codex/config.toml` 的 `[mcp_servers.codex_input_usage]`。
@@ -31,8 +33,8 @@
 ### 5. 视觉与排版核对
 - 离屏渲染预览（`work/preview-strip-light.png`、`work/preview-strip-dark.png`、`work/preview-detail-light.png`、`work/preview-detail-dark.png`）已逐张目视核对：
   - 常驻条完整档 `328×24px`（实机工具栏可用空位实测 `349px`），矢量琥珀金闪电、整数缓存柔色微胶囊、明暗主题均清晰无截断；
-  - 详情面板两位小数缓存率、十通道分段条与 2×5 清单、逐轮明细表排版对齐正常。
-- 用户实机交互验收：用户已确认原生启动、停靠外观、对话切换、TPS 速度、本轮缓存率、十通道上下文与响应优化整体满意。
+  - 详情面板标题栏模型徽标 + 钉住按钮、2×2 卡片（含均速与两位小数缓存率）、独立双列实时额度卡、十通道分段条与 2×5 清单、带拖拽滚动条及底部精确明细条的逐轮表排版对齐正常。
+- 用户实机交互验收：此前版本已由用户确认原生启动、停靠外观、对话切换、TPS 速度、本轮缓存率、十通道上下文与响应优化整体满意。
 
 ## 未在本终端执行的验证边界
-- 受限于代理终端隔离桌面 `exebox-...`，`592f1dc` 的 60 FPS 拖动跟手度与高 DPI（>100%）多屏缩放未在代理终端内自动截屏验证；其中 96 DPI 真实桌面交互由用户本人目视确认。
+- 受限于代理终端隔离桌面 `exebox-...`，本次新增的点击面板外部 / `Esc` 自动收起、钉住开关与滚动条拖拽交互，以及高 DPI 多屏缩放尚未在真实交互桌面实测。

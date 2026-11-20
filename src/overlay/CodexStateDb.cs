@@ -13,6 +13,8 @@ namespace CodexInputUsage
         internal string Name;
         internal string Title;
         internal string FirstUserMessage;
+        internal string Model;
+        internal string ReasoningEffort;
         internal long TokensUsed;
         internal long RecencyAtMs;
     }
@@ -23,7 +25,7 @@ namespace CodexInputUsage
         private const int SqliteOk = 0;
         private const int SqliteRow = 100;
 
-        private const string ThreadColumns = "id, rollout_path, name, title, first_user_message, tokens_used, recency_at_ms";
+        private const string ThreadColumns = "id, rollout_path, name, title, first_user_message, model, reasoning_effort, tokens_used, recency_at_ms";
 
         [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
         private static extern int sqlite3_open_v2(IntPtr filename, out IntPtr db, int flags, IntPtr vfs);
@@ -141,8 +143,10 @@ namespace CodexInputUsage
                         Name = ReadUtf8(stmt, 2),
                         Title = ReadUtf8(stmt, 3),
                         FirstUserMessage = ReadUtf8(stmt, 4),
-                        TokensUsed = sqlite3_column_int64(stmt, 5),
-                        RecencyAtMs = sqlite3_column_int64(stmt, 6)
+                        Model = ReadUtf8(stmt, 5),
+                        ReasoningEffort = ReadUtf8(stmt, 6),
+                        TokensUsed = sqlite3_column_int64(stmt, 7),
+                        RecencyAtMs = sqlite3_column_int64(stmt, 8)
                     });
                 }
             }

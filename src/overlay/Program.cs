@@ -265,18 +265,34 @@ namespace CodexInputUsage
             var tracker = new RolloutSessionTracker();
             tracker.UpdateFromDisk(effectiveThread, "IPC+标题", targetRollout);
             var snap = tracker.BuildSnapshot();
-            sb.AppendLine(string.Format("check_thread={0} rollout={1}", effectiveThread ?? "(explicit)", targetRollout ?? "(none)"));
-            sb.AppendLine(string.Format("metrics hasUsage={0} latestTurn={1} turnCache={2} total={3} input={4} cached={5} output={6} cachePct={7} tps={8} ttft={9} ctx={10}/{11} (cached={12} uncached={13} rem={14}) turns={15}",
+            var quotaReader = new AccountQuotaReader();
+            var liveQuota = quotaReader.GetLatestQuota(true);
+            AccountQuotaReader.ApplyToSnapshot(snap, liveQuota);
+            var metaRec = !string.IsNullOrWhiteSpace(testThread) ? CodexStateDb.TryReadThread(testThread) : null;
+            if (metaRec != null)
+            {
+                snap.ModelName = metaRec.Model;
+                snap.ReasoningEffort = metaRec.ReasoningEffort;
+            }
+            sb.AppendLine(string.Format("check_thread={0} model={1}({2}) rollout={3}",
+                effectiveThread ?? "(explicit)", snap.ModelName ?? "-", snap.ReasoningEffort ?? "-", targetRollout ?? "(none)"));
+            sb.AppendLine(string.Format("metrics hasUsage={0} latestTurn={1} turnCache={2} total={3} input={4} cached={5} output={6} cachePct={7} tps={8} avgTps={9} ttft={10} ctx={11}/{12} (cached={13} uncached={14} rem={15}) turns={16}",
                 snap.HasUsage,
                 snap.LatestTurn != null ? snap.LatestTurn.TotalTokens : 0,
-                snap.LatestTurn != null ? MetricFormatter.FormatCachePrecise(snap.LatestTurn.CacheHitPct) : "--",
+                snap.LatestTurn != null ? MetricFormatter.FormatCacheTwoDecimals(snap.LatestTurn.CacheHitPct) : "--",
                 snap.TotalTokens, snap.InputTokens, snap.CachedInputTokens, snap.OutputTokens,
-                MetricFormatter.FormatCachePrecise(snap.SessionCacheHitPct),
+                MetricFormatter.FormatCacheTwoDecimals(snap.SessionCacheHitPct),
                 MetricFormatter.FormatTps(snap.DisplayTps, snap.TpsIsHeld),
+                snap.SessionAvgTps.HasValue ? snap.SessionAvgTps.Value.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) : "--",
                 MetricFormatter.FormatSeconds(snap.LatestTtftMs),
                 snap.ContextUsedTokens, snap.ContextWindowTokens,
                 snap.ContextCachedTokens, snap.ContextUncachedInputTokens, snap.ContextRemainingTokens,
                 snap.Turns.Count));
+            sb.AppendLine(string.Format("quota live={0} 5hUsed={1} ({2}) weekUsed={3} ({4}) src={5}",
+                snap.QuotaIsAccountLive,
+                snap.PrimaryUsedPct, MetricFormatter.FormatResetCountdown(snap.PrimaryResetsAt, false),
+                snap.SecondaryUsedPct, MetricFormatter.FormatResetCountdown(snap.SecondaryResetsAt, true),
+                liveQuota != null ? Path.GetFileName(liveQuota.SourcePath) : "(none)"));
 
             var variants = StripRenderModel.BuildVariants(snap);
             for (int i = 0; i < variants.Length; i++)
@@ -420,6 +436,7 @@ namespace CodexInputUsage
             private readonly HostWindowEvents _hostEvents = new HostWindowEvents();
             private readonly CodexIpcMonitor _ipc = new CodexIpcMonitor();
             private readonly SessionMatcher _matcher = new SessionMatcher();
+            private readonly AccountQuotaReader _quotaReader = new AccountQuotaReader();
             private readonly RolloutSessionTracker _rollout = new RolloutSessionTracker();
             private readonly ComposerDockTracker _dockTracker;
             private readonly StripForm _strip = new StripForm();
@@ -792,9 +809,15 @@ namespace CodexInputUsage
 
                     bool threadChanged = !string.Equals(_rollout.CurrentThreadId, matched.ThreadId, StringComparison.OrdinalIgnoreCase);
                     bool sourceChanged = !string.Equals(_lastMetrics.BindingSource, matched.Source, StringComparison.Ordinal);
-                    if (_rollout.UpdateFromDisk(matched.ThreadId, matched.Source, matched.RolloutPath) || threadChanged || sourceChanged)
+                    bool rolloutUpdated = _rollout.UpdateFromDisk(matched.ThreadId, matched.Source, matched.RolloutPath);
+                    var liveQuota = _quotaReader.GetLatestQuota(rolloutUpdated || threadChanged);
+                    if (rolloutUpdated || threadChanged || sourceChanged || _popoverWanted)
                     {
-                        _lastMetrics = _rollout.BuildSnapshot();
+                        var nextMetrics = _rollout.BuildSnapshot();
+                        nextMetrics.ModelName = matched.ModelName;
+                        nextMetrics.ReasoningEffort = matched.ReasoningEffort;
+                        AccountQuotaReader.ApplyToSnapshot(nextMetrics, liveQuota);
+                        _lastMetrics = nextMetrics;
                     }
                 }
 

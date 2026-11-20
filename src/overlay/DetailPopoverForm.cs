@@ -5,6 +5,7 @@ using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Drawing.Text;
 using System.Globalization;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace CodexInputUsage
@@ -16,20 +17,76 @@ namespace CodexInputUsage
         private const int WmMouseActivate = 0x0021;
         private const int MaNoActivate = 3;
 
-        private const int PopoverWidth = 496;
+        private const int WhMouseLl = 14;
+        private const int WhKeyboardLl = 13;
+        private const int WmLButtonDown = 0x0201;
+        private const int WmRButtonDown = 0x0204;
+        private const int WmKeyDown = 0x0100;
+        private const int VkEscape = 0x1B;
+
+        private const int PopoverWidth = 516;
         private const int Pad = 14;
-        private const int HeaderHeight = 36;
-        private const int CardGridHeight = 140;
-        private const int ContextBarHeight = 186;
-        private const int TableHeaderHeight = 46;
+        private const int HeaderHeight = 38;
+        private const int CardGridHeight = 138;
+        private const int QuotaSectionHeight = 72;
+        private const int ContextBarHeight = 172;
+        private const int TableHeaderHeight = 44;
         private const int RowHeight = 24;
+        private const int InspectorHeight = 28;
         private const int MaxVisibleRows = 6;
+
+        private delegate IntPtr LowLevelProc(int nCode, IntPtr wParam, IntPtr lParam);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MsllHookStruct
+        {
+            internal NativeWin32.NativePoint Pt;
+            internal uint MouseData, Flags, Time;
+            internal IntPtr ExtraInfo;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct KbdllHookStruct
+        {
+            internal uint VkCode, ScanCode, Flags, Time;
+            internal IntPtr ExtraInfo;
+        }
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelProc lpfn, IntPtr hMod, uint dwThreadId);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool UnhookWindowsHookEx(IntPtr hhk);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
 
         private ThemePalette _palette = ThemePalette.Light;
         private SessionMetricsSnapshot _snapshot = new SessionMetricsSnapshot();
+        private Rectangle _anchorStrip = Rectangle.Empty;
         private Rectangle _closeButtonRect = Rectangle.Empty;
+        private Rectangle _pinButtonRect = Rectangle.Empty;
+        private Rectangle _tableRowsRect = Rectangle.Empty;
+        private Rectangle _scrollTrackRect = Rectangle.Empty;
+        private Rectangle _scrollThumbRect = Rectangle.Empty;
+
         private bool _closeHovered;
+        private bool _pinHovered;
+        private bool _isPinned;
         private int _scrollOffset;
+        private int _visibleRows = MaxVisibleRows;
+        private int _hoveredRowIndex = -1;
+        private int _selectedTurnIndex = -1;
+        private bool _draggingScroll;
+        private int _dragStartY;
+        private int _dragStartOffset;
+
+        private readonly LowLevelProc _mouseProc;
+        private readonly LowLevelProc _keyProc;
+        private IntPtr _mouseHook = IntPtr.Zero;
+        private IntPtr _keyHook = IntPtr.Zero;
+
+        internal bool IsPinned { get { return _isPinned; } }
 
         internal DetailPopoverForm()
         {
@@ -40,6 +97,8 @@ namespace CodexInputUsage
             StartPosition = FormStartPosition.Manual;
             DoubleBuffered = true;
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
+            _mouseProc = OnLowLevelMouse;
+            _keyProc = OnLowLevelKey;
         }
 
         protected override bool ShowWithoutActivation { get { return true; } }
@@ -64,13 +123,87 @@ namespace CodexInputUsage
             base.WndProc(ref m);
         }
 
+        protected override void OnVisibleChanged(EventArgs e)
+        {
+            base.OnVisibleChanged(e);
+            SyncDismissHooks();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            UninstallDismissHooks();
+            base.Dispose(disposing);
+        }
+
+        private void SyncDismissHooks()
+        {
+            if (Visible && !_isPinned && !IsDisposed)
+                InstallDismissHooks();
+            else
+                UninstallDismissHooks();
+        }
+
+        private void InstallDismissHooks()
+        {
+            if (_mouseHook == IntPtr.Zero)
+                _mouseHook = SetWindowsHookEx(WhMouseLl, _mouseProc, IntPtr.Zero, 0);
+            if (_keyHook == IntPtr.Zero)
+                _keyHook = SetWindowsHookEx(WhKeyboardLl, _keyProc, IntPtr.Zero, 0);
+        }
+
+        private void UninstallDismissHooks()
+        {
+            if (_mouseHook != IntPtr.Zero)
+            {
+                try { UnhookWindowsHookEx(_mouseHook); } catch { }
+                _mouseHook = IntPtr.Zero;
+            }
+            if (_keyHook != IntPtr.Zero)
+            {
+                try { UnhookWindowsHookEx(_keyHook); } catch { }
+                _keyHook = IntPtr.Zero;
+            }
+        }
+
+        private IntPtr OnLowLevelMouse(int nCode, IntPtr wParam, IntPtr lParam)
+        {
+            if (nCode >= 0 && Visible && !_isPinned && !_draggingScroll)
+            {
+                int msg = wParam.ToInt32();
+                if (msg == WmLButtonDown || msg == WmRButtonDown)
+                {
+                    var info = (MsllHookStruct)Marshal.PtrToStructure(lParam, typeof(MsllHookStruct));
+                    var pt = new Point(info.Pt.X, info.Pt.Y);
+                    if (!Bounds.Contains(pt) && !_anchorStrip.Contains(pt))
+                    {
+                        try { BeginInvoke((Action)delegate { if (Visible && !_isPinned) Hide(); }); } catch { }
+                    }
+                }
+            }
+            return CallNextHookEx(_mouseHook, nCode, wParam, lParam);
+        }
+
+        private IntPtr OnLowLevelKey(int nCode, IntPtr wParam, IntPtr lParam)
+        {
+            if (nCode >= 0 && Visible && !_isPinned && wParam.ToInt32() == WmKeyDown)
+            {
+                var info = (KbdllHookStruct)Marshal.PtrToStructure(lParam, typeof(KbdllHookStruct));
+                if (info.VkCode == VkEscape)
+                {
+                    try { BeginInvoke((Action)delegate { if (Visible && !_isPinned) Hide(); }); } catch { }
+                }
+            }
+            return CallNextHookEx(_keyHook, nCode, wParam, lParam);
+        }
+
         internal void UpdateData(SessionMetricsSnapshot snapshot, ThemePalette palette, Rectangle anchorStrip)
         {
             _snapshot = snapshot ?? new SessionMetricsSnapshot();
             _palette = palette ?? ThemePalette.Light;
+            _anchorStrip = anchorStrip;
 
             int totalRows = _snapshot.Turns != null ? _snapshot.Turns.Count : 0;
-            int maxScroll = Math.Max(0, totalRows - MaxVisibleRows);
+            int maxScroll = Math.Max(0, totalRows - _visibleRows);
             if (_scrollOffset > maxScroll) _scrollOffset = maxScroll;
 
             PositionAbove(anchorStrip);
@@ -80,13 +213,17 @@ namespace CodexInputUsage
         internal void PositionAbove(Rectangle anchor)
         {
             if (anchor.IsEmpty) return;
+            _anchorStrip = anchor;
+
             int rows = _snapshot.Turns != null ? _snapshot.Turns.Count : 0;
-            int visibleRows = Math.Max(1, Math.Min(MaxVisibleRows, rows));
-            int desiredHeight = HeaderHeight + CardGridHeight + ContextBarHeight + TableHeaderHeight + (visibleRows * RowHeight) + 16;
+            int targetRows = Math.Max(1, Math.Min(MaxVisibleRows, rows));
+            int chromeHeight = HeaderHeight + CardGridHeight + QuotaSectionHeight + ContextBarHeight + TableHeaderHeight + InspectorHeight + 12;
+            int desiredHeight = chromeHeight + (targetRows * RowHeight);
 
             var work = Screen.FromPoint(anchor.Location).WorkingArea;
-            int maxHeight = Math.Max(220, anchor.Top - work.Top - 10);
+            int maxHeight = Math.Max(320, anchor.Top - work.Top - 10);
             int height = Math.Min(desiredHeight, maxHeight);
+            _visibleRows = Math.Max(1, Math.Min(MaxVisibleRows, (height - chromeHeight) / RowHeight));
 
             int x = anchor.Right - PopoverWidth;
             if (x < work.Left + 8) x = work.Left + 8;
@@ -108,7 +245,7 @@ namespace CodexInputUsage
         {
             base.OnMouseWheel(e);
             int totalRows = _snapshot.Turns != null ? _snapshot.Turns.Count : 0;
-            int maxScroll = Math.Max(0, totalRows - MaxVisibleRows);
+            int maxScroll = Math.Max(0, totalRows - _visibleRows);
             if (maxScroll <= 0) return;
             int delta = e.Delta > 0 ? -1 : 1;
             int next = Math.Max(0, Math.Min(maxScroll, _scrollOffset + delta));
@@ -119,54 +256,150 @@ namespace CodexInputUsage
             }
         }
 
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            if (e.Button != MouseButtons.Left) return;
+
+            int totalRows = _snapshot.Turns != null ? _snapshot.Turns.Count : 0;
+            int maxScroll = Math.Max(0, totalRows - _visibleRows);
+            if (maxScroll > 0 && !_scrollTrackRect.IsEmpty)
+            {
+                if (_scrollThumbRect.Contains(e.Location))
+                {
+                    _draggingScroll = true;
+                    _dragStartY = e.Y;
+                    _dragStartOffset = _scrollOffset;
+                    Capture = true;
+                    return;
+                }
+                if (_scrollTrackRect.Contains(e.Location))
+                {
+                    double ratio = (double)(e.Y - _scrollTrackRect.Top) / Math.Max(1, _scrollTrackRect.Height);
+                    _scrollOffset = Math.Max(0, Math.Min(maxScroll, (int)Math.Round(ratio * maxScroll)));
+                    Invalidate();
+                    return;
+                }
+            }
+        }
+
         protected override void OnMouseMove(MouseEventArgs e)
         {
             base.OnMouseMove(e);
-            bool overClose = _closeButtonRect.Contains(e.Location);
-            if (overClose != _closeHovered)
+
+            if (_draggingScroll)
             {
-                _closeHovered = overClose;
-                Cursor = overClose ? Cursors.Hand : Cursors.Default;
-                Invalidate(_closeButtonRect);
+                int totalRows = _snapshot.Turns != null ? _snapshot.Turns.Count : 0;
+                int maxScroll = Math.Max(0, totalRows - _visibleRows);
+                int usableTrack = Math.Max(1, _scrollTrackRect.Height - _scrollThumbRect.Height);
+                int deltaPx = e.Y - _dragStartY;
+                int next = _dragStartOffset + (int)Math.Round(deltaPx * (double)maxScroll / usableTrack);
+                next = Math.Max(0, Math.Min(maxScroll, next));
+                if (next != _scrollOffset)
+                {
+                    _scrollOffset = next;
+                    Invalidate();
+                }
+                return;
             }
+
+            bool overClose = _closeButtonRect.Contains(e.Location);
+            bool overPin = _pinButtonRect.Contains(e.Location);
+            int nextHoverRow = -1;
+            if (!_tableRowsRect.IsEmpty && _tableRowsRect.Contains(e.Location))
+            {
+                int r = (e.Y - _tableRowsRect.Top) / RowHeight;
+                int count = _snapshot.Turns != null ? _snapshot.Turns.Count : 0;
+                if (r >= 0 && r < _visibleRows && (_scrollOffset + r) < count)
+                    nextHoverRow = r;
+            }
+
+            bool needRepaint = (overClose != _closeHovered) || (overPin != _pinHovered) || (nextHoverRow != _hoveredRowIndex);
+            _closeHovered = overClose;
+            _pinHovered = overPin;
+            _hoveredRowIndex = nextHoverRow;
+            bool hand = overClose || overPin || nextHoverRow >= 0 || (!_scrollThumbRect.IsEmpty && _scrollThumbRect.Contains(e.Location));
+            Cursor = hand ? Cursors.Hand : Cursors.Default;
+            if (needRepaint) Invalidate();
         }
 
         protected override void OnMouseLeave(EventArgs e)
         {
             base.OnMouseLeave(e);
-            if (_closeHovered)
+            if (_draggingScroll) return;
+            if (_closeHovered || _pinHovered || _hoveredRowIndex >= 0)
             {
                 _closeHovered = false;
+                _pinHovered = false;
+                _hoveredRowIndex = -1;
                 Cursor = Cursors.Default;
-                Invalidate(_closeButtonRect);
+                Invalidate();
             }
         }
 
         protected override void OnMouseUp(MouseEventArgs e)
         {
             base.OnMouseUp(e);
-            if (e.Button == MouseButtons.Left && _closeButtonRect.Contains(e.Location))
+            if (_draggingScroll)
+            {
+                _draggingScroll = false;
+                Capture = false;
+                return;
+            }
+
+            if (e.Button != MouseButtons.Left) return;
+
+            if (_closeButtonRect.Contains(e.Location))
             {
                 Hide();
+                return;
+            }
+
+            if (_pinButtonRect.Contains(e.Location))
+            {
+                _isPinned = !_isPinned;
+                SyncDismissHooks();
+                Invalidate();
+                return;
+            }
+
+            if (!_tableRowsRect.IsEmpty && _tableRowsRect.Contains(e.Location))
+            {
+                int r = (e.Y - _tableRowsRect.Top) / RowHeight;
+                int count = _snapshot.Turns != null ? _snapshot.Turns.Count : 0;
+                int revIdx = count - 1 - (_scrollOffset + r);
+                if (r >= 0 && r < _visibleRows && revIdx >= 0 && revIdx < count)
+                {
+                    int turnNum = _snapshot.Turns[revIdx].Index;
+                    _selectedTurnIndex = (_selectedTurnIndex == turnNum) ? -1 : turnNum;
+                    Invalidate();
+                }
             }
         }
 
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e);
-            RenderCard(e.Graphics, ClientSize, _snapshot, _palette, _scrollOffset, _closeHovered, out _closeButtonRect);
+            RenderCard(
+                e.Graphics, ClientSize, _snapshot, _palette,
+                _scrollOffset, _visibleRows, _hoveredRowIndex, _selectedTurnIndex,
+                _isPinned, _pinHovered, _closeHovered,
+                out _pinButtonRect, out _closeButtonRect,
+                out _tableRowsRect, out _scrollTrackRect, out _scrollThumbRect);
         }
 
         internal static Bitmap RenderPreviewBitmap(SessionMetricsSnapshot snap, ThemePalette palette)
         {
             int rows = snap != null && snap.Turns != null ? snap.Turns.Count : 0;
-            int visibleRows = Math.Max(1, Math.Min(MaxVisibleRows, rows));
-            int height = HeaderHeight + CardGridHeight + ContextBarHeight + TableHeaderHeight + (visibleRows * RowHeight) + 16;
+            int vis = Math.Max(1, Math.Min(MaxVisibleRows, rows));
+            int height = HeaderHeight + CardGridHeight + QuotaSectionHeight + ContextBarHeight + TableHeaderHeight + (vis * RowHeight) + InspectorHeight + 12;
             var bmp = new Bitmap(PopoverWidth, height, PixelFormat.Format32bppArgb);
             using (var g = Graphics.FromImage(bmp))
             {
-                Rectangle dummy;
-                RenderCard(g, new Size(PopoverWidth, height), snap ?? new SessionMetricsSnapshot(), palette, 0, false, out dummy);
+                Rectangle r1, r2, r3, r4, r5;
+                RenderCard(g, new Size(PopoverWidth, height), snap ?? new SessionMetricsSnapshot(), palette,
+                    0, vis, 0, -1, false, false, false,
+                    out r1, out r2, out r3, out r4, out r5);
             }
             return bmp;
         }
@@ -177,8 +410,17 @@ namespace CodexInputUsage
             SessionMetricsSnapshot snap,
             ThemePalette pal,
             int scrollOffset,
+            int visibleRows,
+            int hoveredRow,
+            int selectedTurnIndex,
+            bool isPinned,
+            bool pinHovered,
             bool closeHovered,
-            out Rectangle closeRect)
+            out Rectangle pinRect,
+            out Rectangle closeRect,
+            out Rectangle tableRowsRect,
+            out Rectangle scrollTrackRect,
+            out Rectangle scrollThumbRect)
         {
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
@@ -190,29 +432,34 @@ namespace CodexInputUsage
             using (var titleFont = new Font("Microsoft YaHei UI", 9.5f, FontStyle.Bold, GraphicsUnit.Point))
             using (var badgeFont = new Font("Segoe UI", 7.8f, FontStyle.Bold, GraphicsUnit.Point))
             using (var labelFont = new Font("Microsoft YaHei UI", 8f, FontStyle.Regular, GraphicsUnit.Point))
-            using (var heroFont = new Font("Segoe UI Semibold", 13.5f, FontStyle.Regular, GraphicsUnit.Point))
-            using (var subFont = new Font("Segoe UI", 8f, FontStyle.Regular, GraphicsUnit.Point))
+            using (var heroFont = new Font("Segoe UI Semibold", 13.0f, FontStyle.Regular, GraphicsUnit.Point))
+            using (var subFont = new Font("Segoe UI", 7.9f, FontStyle.Regular, GraphicsUnit.Point))
             using (var tableHeadFont = new Font("Microsoft YaHei UI", 7.8f, FontStyle.Bold, GraphicsUnit.Point))
-            using (var monoFont = new Font("Consolas", 8.5f, FontStyle.Regular, GraphicsUnit.Point))
-            using (var monoBoldFont = new Font("Consolas", 8.5f, FontStyle.Bold, GraphicsUnit.Point))
+            using (var monoFont = new Font("Consolas", 8.4f, FontStyle.Regular, GraphicsUnit.Point))
+            using (var monoBoldFont = new Font("Consolas", 8.4f, FontStyle.Bold, GraphicsUnit.Point))
             {
-                // 1. Header bar
                 int y = 0;
-                DrawHeader(g, size.Width, y, snap, pal, titleFont, badgeFont, subFont, closeHovered, out closeRect);
+
+                // 1. Header bar (Title + IPC badge + Model/Effort pill + Pin + Close)
+                DrawHeader(g, size.Width, y, snap, pal, titleFont, badgeFont, subFont, isPinned, pinHovered, closeHovered, out pinRect, out closeRect);
                 y += HeaderHeight;
                 using (var sep = new Pen(pal.Border, 1f))
                     g.DrawLine(sep, 1, y, size.Width - 2, y);
 
-                // 2. 2x2 KPI Cards (Antigravity usage-monitor style)
+                // 2. 2x2 KPI Cards
                 int gridTop = y + 10;
                 int gap = 8;
                 int cardW = (size.Width - (Pad * 2) - gap) / 2;
-                int cardH = 58;
+                int cardH = 56;
 
-                // Card 1: TPS
+                // Card 1: TPS + Session Avg TPS
                 string tpsVal = MetricFormatter.FormatTps(snap.DisplayTps, snap.TpsIsHeld);
                 string tpsHero = tpsVal == "--" ? "-- tok/s" : (tpsVal + " tok/s");
-                string tpsSub = string.Format("首字 {0}  ·  活跃 {1}",
+                string avgPart = snap.SessionAvgTps.HasValue
+                    ? ("均速 " + snap.SessionAvgTps.Value.ToString("0.0", CultureInfo.InvariantCulture) + " · ")
+                    : string.Empty;
+                string tpsSub = string.Format("{0}首字 {1} · 活跃 {2}",
+                    avgPart,
                     MetricFormatter.FormatSeconds(snap.LatestTtftMs),
                     MetricFormatter.FormatSeconds(snap.LatestModelActiveMs));
                 Color tpsColor = snap.DisplayTps.HasValue ? pal.ForTier(MetricFormatter.ClassifySpeed(snap.DisplayTps)) : pal.TextMuted;
@@ -220,15 +467,13 @@ namespace CodexInputUsage
                     snap.IsStreaming ? "输出速度 (生成中)" : "输出速度 (TPS)",
                     tpsHero, tpsSub, tpsColor, pal, labelFont, heroFont, subFont);
 
-                // Card 2: Cache Hit Rate (Turn / Session — 2 decimal places in popover)
+                // Card 2: Cache Hit Rate (Turn / Session — 2 decimal places)
                 var latest = snap.LatestTurn;
                 double? turnCachePct = latest != null ? latest.CacheHitPct : null;
                 double? sessCachePct = snap.SessionCacheHitPct;
-                string cacheHero;
-                if (turnCachePct.HasValue && sessCachePct.HasValue)
-                    cacheHero = string.Format("{0} / {1}", MetricFormatter.FormatCacheTwoDecimals(turnCachePct), MetricFormatter.FormatCacheTwoDecimals(sessCachePct));
-                else
-                    cacheHero = MetricFormatter.FormatCacheTwoDecimals(turnCachePct ?? sessCachePct);
+                string cacheHero = (turnCachePct.HasValue && sessCachePct.HasValue)
+                    ? string.Format("{0} / {1}", MetricFormatter.FormatCacheTwoDecimals(turnCachePct), MetricFormatter.FormatCacheTwoDecimals(sessCachePct))
+                    : MetricFormatter.FormatCacheTwoDecimals(turnCachePct ?? sessCachePct);
                 string cacheSub = snap.HasUsage
                     ? string.Format("累计命中 {0} / {1}", MetricFormatter.CompactTokens(snap.CachedInputTokens), MetricFormatter.CompactTokens(snap.InputTokens))
                     : "等待会话数据";
@@ -263,26 +508,36 @@ namespace CodexInputUsage
 
                 y += CardGridHeight;
 
-                // 3. Context Window Bar + 5h/Weekly Quota Badges
-                DrawContextAndQuotaStrip(g, size.Width, y, snap, pal, labelFont, subFont, monoBoldFont);
+                // 3. Dedicated Account-Level Quota Cards (5h + Weekly + Reset Countdown)
+                DrawQuotaSection(g, size.Width, y, snap, pal, labelFont, subFont, monoBoldFont);
+                y += QuotaSectionHeight;
+
+                // 4. 10-Channel Context Window Card
+                DrawContextCard(g, size.Width, y, snap, pal, subFont);
                 y += ContextBarHeight;
 
                 using (var sep = new Pen(pal.Border, 1f))
                     g.DrawLine(sep, Pad, y, size.Width - Pad, y);
 
-                // 4. Per-Turn Table
-                DrawTurnTable(g, size, y, snap, pal, scrollOffset, labelFont, tableHeadFont, monoFont, monoBoldFont);
+                // 5. Per-Turn Table with Visual Scrollbar + Interactive Row Inspector
+                DrawTurnTable(g, size, y, snap, pal, scrollOffset, visibleRows, hoveredRow, selectedTurnIndex,
+                    labelFont, tableHeadFont, subFont, monoFont, monoBoldFont,
+                    out tableRowsRect, out scrollTrackRect, out scrollThumbRect);
             }
         }
 
         private static void DrawHeader(
             Graphics g, int width, int y, SessionMetricsSnapshot snap, ThemePalette pal,
-            Font titleFont, Font badgeFont, Font subFont, bool closeHovered, out Rectangle closeRect)
+            Font titleFont, Font badgeFont, Font subFont,
+            bool isPinned, bool pinHovered, bool closeHovered,
+            out Rectangle pinRect, out Rectangle closeRect)
         {
             using (var titleBrush = new SolidBrush(pal.TextPrimary))
-                g.DrawString("Codex 用量监控", titleFont, titleBrush, Pad, y + 9);
+                g.DrawString("Codex 用量监控", titleFont, titleBrush, Pad, y + 10);
 
-            // Binding badge
+            int curX = Pad + 114;
+
+            // Binding source pill
             string src = string.IsNullOrWhiteSpace(snap.BindingSource) ? "等待" : snap.BindingSource;
             Color badgeColor;
             string badgeText;
@@ -294,7 +549,7 @@ namespace CodexInputUsage
             else if (src == "待确认" || src == "多窗口歧义")
             {
                 badgeColor = pal.TierWarn;
-                badgeText = "会话待确认";
+                badgeText = "待确认";
             }
             else if (src == "IPC 断线")
             {
@@ -306,28 +561,41 @@ namespace CodexInputUsage
                 badgeColor = pal.TextMuted;
                 badgeText = "等待会话";
             }
-            SizeF bSz = g.MeasureString(badgeText, badgeFont);
-            var badgeRect = new Rectangle(Pad + 114, y + 9, (int)Math.Ceiling(bSz.Width) + 12, 18);
-            using (var path = StripForm.CreateRoundedPath(badgeRect, 4))
-            using (var fill = new SolidBrush(Color.FromArgb(26, badgeColor)))
-            using (var pen = new Pen(Color.FromArgb(95, badgeColor), 1f))
-            using (var textBrush = new SolidBrush(badgeColor))
-            {
-                g.FillPath(fill, path);
-                g.DrawPath(pen, path);
-                g.DrawString(badgeText, badgeFont, textBrush, badgeRect.X + 6, badgeRect.Y + 2);
-            }
 
-            // Short Thread ID
-            if (!string.IsNullOrWhiteSpace(snap.ThreadId))
+            curX = DrawSmallPill(g, curX, y + 10, badgeText, badgeFont, badgeColor);
+
+            // Model & reasoning effort pill (from state_5.sqlite)
+            string modelBadge = MetricFormatter.FormatModelBadge(snap.ModelName, snap.ReasoningEffort);
+            if (!string.IsNullOrEmpty(modelBadge))
             {
-                string tid = MetricFormatter.ShortThreadId(snap.ThreadId);
+                curX = DrawSmallPill(g, curX + 6, y + 10, modelBadge, badgeFont, pal.AccentBlue);
+            }
+            else if (!string.IsNullOrWhiteSpace(snap.ThreadId))
+            {
                 using (var tidBrush = new SolidBrush(pal.TextMuted))
-                    g.DrawString(tid, subFont, tidBrush, badgeRect.Right + 8, y + 10);
+                    g.DrawString(MetricFormatter.ShortThreadId(snap.ThreadId), subFont, tidBrush, curX + 8, y + 11);
             }
 
-            // Close button
-            closeRect = new Rectangle(width - Pad - 22, y + 7, 22, 22);
+            // Right buttons: Pin toggle + Close
+            closeRect = new Rectangle(width - Pad - 22, y + 8, 22, 22);
+            pinRect = new Rectangle(closeRect.Left - 46, y + 8, 42, 22);
+
+            Color pinAccent = isPinned ? pal.AccentBlue : (pinHovered ? pal.TextPrimary : pal.TextSecondary);
+            if (isPinned || pinHovered)
+            {
+                using (var pPath = StripForm.CreateRoundedPath(pinRect, 4))
+                using (var pFill = new SolidBrush(isPinned ? Color.FromArgb(26, pal.AccentBlue) : pal.RowHoverBg))
+                    g.FillPath(pFill, pPath);
+                if (isPinned)
+                {
+                    using (var pPath = StripForm.CreateRoundedPath(pinRect, 4))
+                    using (var pPen = new Pen(Color.FromArgb(95, pal.AccentBlue), 1f))
+                        g.DrawPath(pPen, pPath);
+                }
+            }
+            using (var pinBrush = new SolidBrush(pinAccent))
+                g.DrawString(isPinned ? "已钉" : "钉住", badgeFont, pinBrush, pinRect.X + 7, pinRect.Y + 4);
+
             if (closeHovered)
             {
                 using (var path = StripForm.CreateRoundedPath(closeRect, 4))
@@ -341,6 +609,22 @@ namespace CodexInputUsage
                 g.DrawLine(xPen, cx, cy, cx + 8, cy + 8);
                 g.DrawLine(xPen, cx + 8, cy, cx, cy + 8);
             }
+        }
+
+        private static int DrawSmallPill(Graphics g, int x, int y, string text, Font font, Color accent)
+        {
+            SizeF sz = g.MeasureString(text, font);
+            var rect = new Rectangle(x, y, (int)Math.Ceiling(sz.Width) + 12, 18);
+            using (var path = StripForm.CreateRoundedPath(rect, 4))
+            using (var fill = new SolidBrush(Color.FromArgb(24, accent)))
+            using (var pen = new Pen(Color.FromArgb(88, accent), 1f))
+            using (var brush = new SolidBrush(accent))
+            {
+                g.FillPath(fill, path);
+                g.DrawPath(pen, path);
+                g.DrawString(text, font, brush, rect.X + 6, rect.Y + 2);
+            }
+            return rect.Right;
         }
 
         private static void DrawKpiCard(
@@ -361,15 +645,93 @@ namespace CodexInputUsage
             {
                 g.DrawString(title, labelFont, lblBrush, rect.X + 10, rect.Y + 6);
                 g.DrawString(value, heroFont, valBrush, rect.X + 9, rect.Y + 19);
-                g.DrawString(sub, subFont, subBrush, rect.X + 10, rect.Y + 41);
+                g.DrawString(sub, subFont, subBrush, rect.X + 10, rect.Y + 40);
             }
         }
 
-        private static void DrawContextAndQuotaStrip(
+        private static void DrawQuotaSection(
             Graphics g, int width, int y, SessionMetricsSnapshot snap, ThemePalette pal,
             Font labelFont, Font subFont, Font monoBoldFont)
         {
-            var cardRect = new Rectangle(Pad, y + 4, width - (Pad * 2), ContextBarHeight - 10);
+            int gap = 8;
+            int cardW = (width - (Pad * 2) - gap) / 2;
+            int cardH = QuotaSectionHeight - 10;
+
+            DrawSingleQuotaCard(
+                g, new Rectangle(Pad, y + 2, cardW, cardH),
+                "5h 额度余量", snap.PrimaryUsedPct, snap.PrimaryResetsAt, false,
+                snap.QuotaIsAccountLive ? "实时" : null, pal, labelFont, subFont, monoBoldFont);
+
+            string creditNote = (snap.HasCredits && !string.IsNullOrWhiteSpace(snap.CreditsBalance) && snap.CreditsBalance != "0")
+                ? ("余额 $" + snap.CreditsBalance)
+                : (snap.UnlimitedCredits ? "无限额度" : null);
+            DrawSingleQuotaCard(
+                g, new Rectangle(Pad + cardW + gap, y + 2, cardW, cardH),
+                "周额度余量", snap.SecondaryUsedPct, snap.SecondaryResetsAt, true,
+                creditNote, pal, labelFont, subFont, monoBoldFont);
+        }
+
+        private static void DrawSingleQuotaCard(
+            Graphics g, Rectangle rect, string title, double? usedPct, long? resetsAt, bool isWeekly,
+            string rightTag, ThemePalette pal, Font labelFont, Font subFont, Font monoBoldFont)
+        {
+            using (var path = StripForm.CreateRoundedPath(rect, 6))
+            using (var fill = new SolidBrush(pal.CardBg))
+            using (var pen = new Pen(pal.Border, 1f))
+            {
+                g.FillPath(fill, path);
+                g.DrawPath(pen, path);
+            }
+
+            int ix = rect.X + 10;
+            int iw = rect.Width - 20;
+
+            using (var lblBrush = new SolidBrush(pal.TextSecondary))
+                g.DrawString(title, labelFont, lblBrush, ix, rect.Y + 7);
+
+            bool hasVal = usedPct.HasValue;
+            double rem = hasVal ? Math.Max(0.0, Math.Min(100.0, 100.0 - usedPct.Value)) : 0.0;
+            string countdown = MetricFormatter.FormatResetCountdown(resetsAt, isWeekly);
+            bool alreadyReset = countdown == "已重置";
+            if (hasVal && alreadyReset) rem = 100.0;
+
+            Color tierCol = hasVal ? pal.ForTier(MetricFormatter.ClassifyQuotaRemaining(rem)) : pal.TextMuted;
+            string pctStr = hasVal ? string.Format("{0:0}%", rem) : "--";
+            using (var pctBrush = new SolidBrush(tierCol))
+            using (var rightFmt = new StringFormat { Alignment = StringAlignment.Far })
+                g.DrawString(pctStr, monoBoldFont, pctBrush, rect.Right - 10, rect.Y + 7, rightFmt);
+
+            // Progress track
+            var trackRect = new Rectangle(ix, rect.Y + 27, iw, 6);
+            using (var tPath = StripForm.CreateRoundedPath(trackRect, 3))
+            using (var tBrush = new SolidBrush(pal.TrackBg))
+                g.FillPath(tBrush, tPath);
+
+            if (hasVal && rem > 0)
+            {
+                int fw = Math.Max(6, (int)Math.Round(iw * rem / 100.0));
+                var fillRect = new Rectangle(ix, rect.Y + 27, Math.Min(iw, fw), 6);
+                using (var fPath = StripForm.CreateRoundedPath(fillRect, 3))
+                using (var fBrush = new SolidBrush(tierCol))
+                    g.FillPath(fBrush, fPath);
+            }
+
+            // Bottom line: reset countdown on left + live/credit tag on right
+            string footLeft = !string.IsNullOrEmpty(countdown) ? countdown : (hasVal ? "配额已同步" : "等待配额数据");
+            using (var mBrush = new SolidBrush(pal.TextMuted))
+                g.DrawString(footLeft, subFont, mBrush, ix, rect.Y + 40);
+
+            if (!string.IsNullOrEmpty(rightTag))
+            {
+                using (var tagBrush = new SolidBrush(pal.TextSecondary))
+                using (var rightFmt = new StringFormat { Alignment = StringAlignment.Far })
+                    g.DrawString(rightTag, subFont, tagBrush, rect.Right - 10, rect.Y + 40, rightFmt);
+            }
+        }
+
+        private static void DrawContextCard(Graphics g, int width, int y, SessionMetricsSnapshot snap, ThemePalette pal, Font subFont)
+        {
+            var cardRect = new Rectangle(Pad, y + 2, width - (Pad * 2), ContextBarHeight - 8);
             using (var cardPath = StripForm.CreateRoundedPath(cardRect, 7))
             using (var cardFill = new SolidBrush(pal.CardBg))
             using (var cardPen = new Pen(pal.Border, 1f))
@@ -381,26 +743,25 @@ namespace CodexInputUsage
             int innerX = cardRect.X + 12;
             int innerW = cardRect.Width - 24;
 
-            // Row 1: Stacked-layers icon + bold "上下文窗口" on left; right-aligned "271.7k / 475.0k (57.2%)"
             DrawLayersIcon(g, innerX, cardRect.Y + 9, pal.TextPrimary);
             using (var hdrFont = new Font("Microsoft YaHei UI", 9.0f, FontStyle.Bold, GraphicsUnit.Point))
             using (var hdrBrush = new SolidBrush(pal.TextPrimary))
                 g.DrawString("上下文窗口", hdrFont, hdrBrush, innerX + 18, cardRect.Y + 8);
 
             string rightUsage = snap.ContextWindowTokens > 0
-                ? string.Format("{0} / {1} ({2:0.0}%)",
+                ? string.Format("{0} / {1} ({2:0.0}%)  ·  剩余 {3}",
                     MetricFormatter.CompactTokensLower(snap.ContextUsedTokens),
                     MetricFormatter.CompactTokensLower(snap.ContextWindowTokens),
-                    snap.ContextPct ?? 0.0)
+                    snap.ContextPct ?? 0.0,
+                    MetricFormatter.CompactTokensLower(snap.ContextRemainingTokens))
                 : (snap.ContextUsedTokens > 0 ? (MetricFormatter.CompactTokensLower(snap.ContextUsedTokens) + " / --") : "-- / --");
-            using (var rightFont = new Font("Segoe UI", 8.8f, FontStyle.Regular, GraphicsUnit.Point))
+            using (var rightFont = new Font("Segoe UI", 8.4f, FontStyle.Regular, GraphicsUnit.Point))
             using (var rightBrush = new SolidBrush(pal.TextSecondary))
             {
                 SizeF rSz = g.MeasureString(rightUsage, rightFont);
                 g.DrawString(rightUsage, rightFont, rightBrush, cardRect.Right - 12 - rSz.Width, cardRect.Y + 9);
             }
 
-            // Row 2: Gapped 10-channel rounded segmented bar (matches Antigravity usage-monitor screenshot!)
             int barY = cardRect.Y + 32;
             int barH = 7;
             var trackRect = new Rectangle(innerX, barY, innerW, barH);
@@ -431,7 +792,7 @@ namespace CodexInputUsage
                     {
                         var ch = nonZero[i];
                         int segW = (int)Math.Round(availPx * (ch.Tokens / (double)usedSum));
-                        if (segW < 4) segW = 4; // small non-zero channels stay cleanly visible as pill dots
+                        if (segW < 4) segW = 4;
                         if (curX + segW > innerX + innerW) segW = (innerX + innerW) - curX;
                         if (segW <= 0) break;
 
@@ -445,11 +806,10 @@ namespace CodexInputUsage
                 }
             }
 
-            // Row 3: 2-column x 5-row channel breakdown grid (colored rounded square + label + right-aligned bold count)
             int gridY = cardRect.Y + 47;
             int colGap = 18;
             int colW = (innerW - colGap) / 2;
-            int itemRowH = 20;
+            int itemRowH = 21;
 
             using (var chLabelFont = new Font("Microsoft YaHei UI", 8.3f, FontStyle.Regular, GraphicsUnit.Point))
             using (var chValFont = new Font("Segoe UI Semibold", 8.6f, FontStyle.Regular, GraphicsUnit.Point))
@@ -477,38 +837,6 @@ namespace CodexInputUsage
                     g.DrawString(valText, chValFont, ch.Tokens > 0 ? valBrush : zeroBrush, cx + colW, cy + 1, rightFmt);
                 }
             }
-
-            // Compact footer inside card: remaining space + 5h/weekly quota
-            int footY = cardRect.Bottom - 20;
-            using (var sep = new Pen(pal.Border, 1f))
-                g.DrawLine(sep, innerX, footY - 3, cardRect.Right - 12, footY - 3);
-
-            if (snap.ContextWindowTokens > 0)
-            {
-                double pct = snap.ContextPct ?? 0.0;
-                Color remCol = pct >= 85.0 ? pal.TierDanger : (pct >= 70.0 ? pal.TierWarn : pal.TextMuted);
-                using (var rb = new SolidBrush(remCol))
-                    g.DrawString("剩余可用 " + MetricFormatter.CompactTokensLower(snap.ContextRemainingTokens), subFont, rb, innerX, footY);
-            }
-
-            var quotaParts = new List<string>();
-            if (snap.PrimaryUsedPct.HasValue)
-            {
-                double rem = Math.Max(0, Math.Min(100, 100.0 - snap.PrimaryUsedPct.Value));
-                quotaParts.Add(string.Format("5h 余 {0:0}%", rem));
-            }
-            if (snap.SecondaryUsedPct.HasValue)
-            {
-                double rem = Math.Max(0, Math.Min(100, 100.0 - snap.SecondaryUsedPct.Value));
-                quotaParts.Add(string.Format("周余 {0:0}%", rem));
-            }
-            if (quotaParts.Count > 0)
-            {
-                string qText = string.Join("  ·  ", quotaParts.ToArray());
-                SizeF qSz = g.MeasureString(qText, subFont);
-                using (var qb = new SolidBrush(pal.TextSecondary))
-                    g.DrawString(qText, subFont, qb, cardRect.Right - 12 - qSz.Width, footY);
-            }
         }
 
         private static void DrawLayersIcon(Graphics g, int x, int y, Color color)
@@ -516,7 +844,6 @@ namespace CodexInputUsage
             using (var pen = new Pen(color, 1.3f))
             {
                 pen.LineJoin = LineJoin.Round;
-                // Top diamond
                 g.DrawPolygon(pen, new PointF[]
                 {
                     new PointF(x + 6f, y + 1f),
@@ -524,14 +851,12 @@ namespace CodexInputUsage
                     new PointF(x + 6f, y + 7f),
                     new PointF(x + 0f, y + 4f)
                 });
-                // Middle chevron
                 g.DrawLines(pen, new PointF[]
                 {
                     new PointF(x + 0f, y + 7.5f),
                     new PointF(x + 6f, y + 10.5f),
                     new PointF(x + 12f, y + 7.5f)
                 });
-                // Bottom chevron
                 g.DrawLines(pen, new PointF[]
                 {
                     new PointF(x + 0f, y + 10.5f),
@@ -542,36 +867,41 @@ namespace CodexInputUsage
         }
 
         private static void DrawTurnTable(
-            Graphics g, Size size, int topY, SessionMetricsSnapshot snap, ThemePalette pal, int scrollOffset,
-            Font labelFont, Font headFont, Font monoFont, Font monoBoldFont)
+            Graphics g, Size size, int topY, SessionMetricsSnapshot snap, ThemePalette pal,
+            int scrollOffset, int visibleRows, int hoveredRow, int selectedTurnIndex,
+            Font labelFont, Font headFont, Font subFont, Font monoFont, Font monoBoldFont,
+            out Rectangle tableRowsRect, out Rectangle scrollTrackRect, out Rectangle scrollThumbRect)
         {
+            tableRowsRect = Rectangle.Empty;
+            scrollTrackRect = Rectangle.Empty;
+            scrollThumbRect = Rectangle.Empty;
+
             var turns = snap.Turns ?? new List<TurnSummary>();
             int count = turns.Count;
+            bool needScroll = count > visibleRows;
+            int scrollReserve = needScroll ? 12 : 0;
 
             using (var titleBrush = new SolidBrush(pal.TextPrimary))
             using (var mutedBrush = new SolidBrush(pal.TextMuted))
             {
-                g.DrawString(string.Format("逐轮明细 ({0})", count), headFont, titleBrush, Pad, topY + 8);
-                if (count > MaxVisibleRows)
-                {
-                    string hint = string.Format("最新在前 · 滚轮翻页 ({0}-{1}/{2})",
-                        scrollOffset + 1, Math.Min(count, scrollOffset + MaxVisibleRows), count);
-                    SizeF hSz = g.MeasureString(hint, labelFont);
-                    g.DrawString(hint, labelFont, mutedBrush, size.Width - Pad - hSz.Width, topY + 7);
-                }
+                g.DrawString(string.Format("逐轮明细 ({0})", count), headFont, titleBrush, Pad, topY + 7);
+                string hint = needScroll
+                    ? string.Format("悬停/点击行看精确明细 · {0}-{1}/{2}", scrollOffset + 1, Math.Min(count, scrollOffset + visibleRows), count)
+                    : "悬停或点击行查看精确明细";
+                SizeF hSz = g.MeasureString(hint, labelFont);
+                g.DrawString(hint, labelFont, mutedBrush, size.Width - Pad - hSz.Width, topY + 6);
             }
 
-            // Column X positions inside [Pad .. Width - Pad]
+            int rightEdge = size.Width - Pad - scrollReserve;
             int colIdx = Pad;
-            int colTime = Pad + 32;
-            int colTps = Pad + 86;
-            int colTtft = Pad + 148;
-            int colIn = Pad + 206;
-            int colOut = Pad + 286;
+            int colTime = Pad + 30;
+            int colTps = Pad + 84;
+            int colTtft = Pad + 144;
+            int colIn = Pad + 204;
+            int colOut = Pad + 284;
             int colTot = Pad + 344;
-            int colRight = size.Width - Pad;
 
-            int headY = topY + 26;
+            int headY = topY + 25;
             using (var headBrush = new SolidBrush(pal.TextSecondary))
             using (var rightFmt = new StringFormat { Alignment = StringAlignment.Far })
             {
@@ -582,7 +912,7 @@ namespace CodexInputUsage
                 g.DrawString("输入", headFont, headBrush, colIn + 64, headY, rightFmt);
                 g.DrawString("输出", headFont, headBrush, colOut + 46, headY, rightFmt);
                 g.DrawString("总计", headFont, headBrush, colTot + 52, headY, rightFmt);
-                g.DrawString("缓存", headFont, headBrush, colRight, headY, rightFmt);
+                g.DrawString("缓存", headFont, headBrush, rightEdge, headY, rightFmt);
             }
 
             int rowsStartY = topY + TableHeaderHeight;
@@ -593,26 +923,44 @@ namespace CodexInputUsage
                 return;
             }
 
-            int visible = Math.Min(MaxVisibleRows, Math.Max(1, (size.Height - rowsStartY - 8) / RowHeight));
+            int vis = Math.Min(visibleRows, count);
+            tableRowsRect = new Rectangle(Pad - 4, rowsStartY, (rightEdge - Pad) + 8, vis * RowHeight);
+            TurnSummary inspected = null;
+
             using (var textBrush = new SolidBrush(pal.TextPrimary))
             using (var secBrush = new SolidBrush(pal.TextSecondary))
+            using (var accentBrush = new SolidBrush(pal.AccentBlue))
             using (var rightFmt = new StringFormat { Alignment = StringAlignment.Far })
             {
-                for (int i = 0; i < visible; i++)
+                for (int i = 0; i < vis; i++)
                 {
                     int revIndex = count - 1 - (scrollOffset + i);
                     if (revIndex < 0) break;
                     var t = turns[revIndex];
                     int ry = rowsStartY + (i * RowHeight);
+                    bool isSel = t.Index == selectedTurnIndex;
+                    bool isHov = i == hoveredRow;
 
-                    if (i % 2 == 1)
+                    if (isSel)
+                    {
+                        using (var sb = new SolidBrush(Color.FromArgb(24, pal.AccentBlue)))
+                            g.FillRectangle(sb, Pad - 4, ry, (rightEdge - Pad) + 8, RowHeight);
+                        inspected = t;
+                    }
+                    else if (isHov)
+                    {
+                        using (var hb = new SolidBrush(pal.RowHoverBg))
+                            g.FillRectangle(hb, Pad - 4, ry, (rightEdge - Pad) + 8, RowHeight);
+                        if (inspected == null) inspected = t;
+                    }
+                    else if (i % 2 == 1)
                     {
                         using (var alt = new SolidBrush(pal.RowAltBg))
-                            g.FillRectangle(alt, Pad - 4, ry, size.Width - (Pad * 2) + 8, RowHeight);
+                            g.FillRectangle(alt, Pad - 4, ry, (rightEdge - Pad) + 8, RowHeight);
                     }
 
                     int ty = ry + 4;
-                    g.DrawString(t.Index.ToString(CultureInfo.InvariantCulture), monoFont, secBrush, colIdx, ty);
+                    g.DrawString(t.Index.ToString(CultureInfo.InvariantCulture), monoFont, isSel ? accentBrush : secBrush, colIdx, ty);
                     string timeStr = t.CompletedAtLocal.HasValue
                         ? t.CompletedAtLocal.Value.ToString("HH:mm", CultureInfo.InvariantCulture)
                         : (t.Complete ? "--" : "进行中");
@@ -635,9 +983,60 @@ namespace CodexInputUsage
                     string cacheStr = MetricFormatter.FormatCacheTwoDecimals(t.CacheHitPct);
                     Color cacheCol = t.CacheHitPct.HasValue ? pal.ForTier(MetricFormatter.ClassifyCache(t.CacheHitPct)) : pal.TextMuted;
                     using (var cacheBrush = new SolidBrush(cacheCol))
-                        g.DrawString(cacheStr, monoBoldFont, cacheBrush, colRight, ty, rightFmt);
+                        g.DrawString(cacheStr, monoBoldFont, cacheBrush, rightEdge, ty, rightFmt);
                 }
             }
+
+            // Visual draggable scrollbar when turns exceed visible rows
+            if (needScroll)
+            {
+                int trackH = vis * RowHeight;
+                scrollTrackRect = new Rectangle(size.Width - Pad - 6, rowsStartY, 6, trackH);
+                using (var tp = StripForm.CreateRoundedPath(scrollTrackRect, 3))
+                using (var tb = new SolidBrush(pal.TrackBg))
+                    g.FillPath(tb, tp);
+
+                int maxScroll = Math.Max(1, count - vis);
+                int thumbH = Math.Max(22, (int)Math.Round(trackH * (vis / (double)count)));
+                int thumbTop = rowsStartY + (int)Math.Round((trackH - thumbH) * (scrollOffset / (double)maxScroll));
+                scrollThumbRect = new Rectangle(scrollTrackRect.X, thumbTop, 6, thumbH);
+                using (var thp = StripForm.CreateRoundedPath(scrollThumbRect, 3))
+                using (var thb = new SolidBrush(pal.BorderStrong))
+                    g.FillPath(thb, thp);
+            }
+
+            // Bottom exact-turn inspector bar (defaults to hovered/selected or latest turn)
+            if (inspected == null && selectedTurnIndex > 0)
+            {
+                for (int i = 0; i < turns.Count; i++)
+                {
+                    if (turns[i].Index == selectedTurnIndex) { inspected = turns[i]; break; }
+                }
+            }
+            if (inspected == null) inspected = turns[count - 1];
+
+            int inspY = rowsStartY + (vis * RowHeight) + 4;
+            var inspRect = new Rectangle(Pad, inspY, size.Width - (Pad * 2), InspectorHeight - 4);
+            using (var ip = StripForm.CreateRoundedPath(inspRect, 5))
+            using (var ib = new SolidBrush(pal.CardBg))
+            using (var ipen = new Pen(pal.Border, 1f))
+            {
+                g.FillPath(ib, ip);
+                g.DrawPath(ipen, ip);
+            }
+
+            long toolMs = (inspected.WallDurationMs.HasValue && inspected.WallDurationMs.Value > inspected.ModelActiveMs)
+                ? (inspected.WallDurationMs.Value - inspected.ModelActiveMs)
+                : 0;
+            string detailLine = string.Format("#{0} 精确  总 {1} · 命中 {2} · 推理 {3} · 总耗时 {4} (工具 {5})",
+                inspected.Index,
+                MetricFormatter.ExactTokens(inspected.TotalTokens),
+                MetricFormatter.ExactTokens(inspected.CachedInputTokens),
+                MetricFormatter.ExactTokens(inspected.ReasoningOutputTokens),
+                MetricFormatter.FormatSeconds(inspected.WallDurationMs),
+                MetricFormatter.FormatSeconds(toolMs));
+            using (var db = new SolidBrush(pal.TextSecondary))
+                g.DrawString(detailLine, subFont, db, inspRect.X + 8, inspRect.Y + 5);
         }
     }
 }

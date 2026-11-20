@@ -33,11 +33,26 @@ namespace CodexInputUsage
         internal long Tokens;
     }
 
+    internal sealed class AccountQuotaSnapshot
+    {
+        internal double? PrimaryUsedPct;
+        internal long? PrimaryResetsAt;
+        internal double? SecondaryUsedPct;
+        internal long? SecondaryResetsAt;
+        internal bool HasCredits;
+        internal bool UnlimitedCredits;
+        internal string CreditsBalance;
+        internal DateTime ObservedAtUtc;
+        internal string SourcePath;
+    }
+
     internal sealed class SessionMetricsSnapshot
     {
         internal string ThreadId;
-        internal string BindingSource; // "IPC" / "SQLite" / "等待"
+        internal string BindingSource; // "IPC+标题" / "IPC+正文" / "IPC" / "待确认" / "IPC 断线"
         internal string RolloutPath;
+        internal string ModelName;
+        internal string ReasoningEffort;
         internal bool HasUsage;
         internal bool IsStreaming;
 
@@ -48,6 +63,7 @@ namespace CodexInputUsage
         internal long ReasoningOutputTokens;
         internal long TotalTokens;
         internal double? SessionCacheHitPct;
+        internal double? SessionAvgTps;
 
         // Context window
         internal long ContextUsedTokens;
@@ -59,11 +75,15 @@ namespace CodexInputUsage
         internal double? ContextPct;
         internal List<ContextChannelItem> ContextChannels = new List<ContextChannelItem>();
 
-        // Rate limits (5h primary, 7d secondary)
+        // Rate limits (account-level real-time preferred; falls back to session rollout)
         internal double? PrimaryUsedPct;
         internal long? PrimaryResetsAt;
         internal double? SecondaryUsedPct;
         internal long? SecondaryResetsAt;
+        internal bool HasCredits;
+        internal bool UnlimitedCredits;
+        internal string CreditsBalance;
+        internal bool QuotaIsAccountLive;
 
         // Latest turn highlights
         internal double? DisplayTps;
@@ -169,6 +189,45 @@ namespace CodexInputUsage
             if (sec >= 30.0) return MetricTier.Danger;
             if (sec >= 18.0) return MetricTier.Warn;
             return MetricTier.Good;
+        }
+
+        internal static MetricTier ClassifyQuotaRemaining(double remainingPct)
+        {
+            if (remainingPct >= 50.0) return MetricTier.Good;
+            if (remainingPct >= 30.0) return MetricTier.Info;
+            if (remainingPct >= 15.0) return MetricTier.Warn;
+            return MetricTier.Danger;
+        }
+
+        internal static string FormatResetCountdown(long? resetsAtUnix, bool isWeekly)
+        {
+            if (!resetsAtUnix.HasValue || resetsAtUnix.Value <= 0) return string.Empty;
+            DateTime epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+            DateTime resetUtc = epoch.AddSeconds(resetsAtUnix.Value);
+            TimeSpan diff = resetUtc - DateTime.UtcNow;
+            if (diff.TotalSeconds <= 0) return "已重置";
+            if (!isWeekly || diff.TotalHours < 24.0)
+            {
+                int totalMins = Math.Max(1, (int)Math.Ceiling(diff.TotalMinutes));
+                int h = totalMins / 60;
+                int m = totalMins % 60;
+                if (h <= 0) return string.Format("{0}m 后重置", m);
+                if (m == 0) return string.Format("{0}h 后重置", h);
+                return string.Format("{0}h {1}m 后重置", h, m);
+            }
+            DateTime local = resetUtc.ToLocalTime();
+            string[] wk = new string[] { "周日", "周一", "周二", "周三", "周四", "周五", "周六" };
+            return string.Format("{0} {1:HH:mm} 重置", wk[(int)local.DayOfWeek], local);
+        }
+
+        internal static string FormatModelBadge(string model, string effort)
+        {
+            if (string.IsNullOrWhiteSpace(model)) return string.Empty;
+            string m = model.Trim();
+            if (string.IsNullOrWhiteSpace(effort)) return m;
+            string e = effort.Trim().ToLowerInvariant();
+            string effLabel = e == "high" ? "高" : (e == "medium" ? "中" : (e == "low" ? "低" : effort.Trim()));
+            return m + " · " + effLabel;
         }
 
         internal static string[] BuildStripVariants(SessionMetricsSnapshot snap)
@@ -695,11 +754,27 @@ namespace CodexInputUsage
                 ContextChannels = BuildContextChannels(_contextUsed)
             };
 
+            long avgOut = 0;
+            long avgModelMs = 0;
             for (int i = 0; i < _turnsOrdered.Count; i++)
             {
                 var summary = BuildTurnSummary(_turnsOrdered[i]);
                 if (summary.TotalTokens > 0)
+                {
                     snap.Turns.Add(summary);
+                    if (summary.OutputTokens > 0 && summary.ModelActiveMs >= 200)
+                    {
+                        avgOut += summary.OutputTokens;
+                        avgModelMs += summary.ModelActiveMs;
+                    }
+                }
+            }
+
+            if (avgOut > 0 && avgModelMs >= 500)
+            {
+                double avg = avgOut * 1000.0 / avgModelMs;
+                if (!double.IsNaN(avg) && !double.IsInfinity(avg) && avg > 0 && avg <= MaxPlausibleTps)
+                    snap.SessionAvgTps = avg;
             }
 
             if (snap.Turns.Count > 0)

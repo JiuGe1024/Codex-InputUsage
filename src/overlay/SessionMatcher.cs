@@ -12,6 +12,8 @@ namespace CodexInputUsage
     {
         internal string ThreadId;
         internal string RolloutPath;
+        internal string ModelName;
+        internal string ReasoningEffort;
         internal string Source; // "IPC+标题", "IPC+正文", "IPC", "IPC 断线", "待确认"
         internal string Detail;
     }
@@ -80,6 +82,8 @@ namespace CodexInputUsage
                 {
                     ThreadId = win.Id,
                     RolloutPath = ResolveRollout(win),
+                    ModelName = win.Model,
+                    ReasoningEffort = win.ReasoningEffort,
                     Source = "IPC+标题",
                     Detail = string.Format("followed={0} headerHit=\"{1}\"", followed.Length, Truncate(win.Name ?? win.Title, 32))
                 };
@@ -98,6 +102,8 @@ namespace CodexInputUsage
                     {
                         ThreadId = bodyWinner.Id,
                         RolloutPath = ResolveRollout(bodyWinner),
+                        ModelName = bodyWinner.Model,
+                        ReasoningEffort = bodyWinner.ReasoningEffort,
                         Source = "IPC+正文",
                         Detail = string.Format("followed={0} bodyScore={1} second={2}", followed.Length, bestScore, secondScore)
                     };
@@ -113,6 +119,8 @@ namespace CodexInputUsage
                 {
                     ThreadId = only.Id,
                     RolloutPath = ResolveRollout(only),
+                    ModelName = only.Model,
+                    ReasoningEffort = only.ReasoningEffort,
                     Source = "IPC",
                     Detail = "single-followed-thread"
                 };
