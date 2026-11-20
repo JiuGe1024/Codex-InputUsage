@@ -346,6 +346,7 @@ namespace CodexInputUsage
             private DateTime _lastCodexPresenceCheckUtc = DateTime.MinValue;
             private DateTime _lastHeartbeatUtc = DateTime.MinValue;
             private string _lastDiagState = string.Empty;
+            private string _lastMatchDetail = string.Empty;
             private string _lastFingerprintSig = string.Empty;
             private bool _codexRunning;
             private bool _capturedOnce;
@@ -510,6 +511,7 @@ namespace CodexInputUsage
                     _lastFingerprintSig = fpSig;
                     _lastMetricsPollUtc = now;
                     matched = _matcher.Resolve(ipcSt, dock.HeaderTexts, dock.BodyTexts);
+                    _lastMatchDetail = matched.Detail ?? matched.Source;
 
                     bool threadChanged = !string.Equals(_rollout.CurrentThreadId, matched.ThreadId, StringComparison.OrdinalIgnoreCase);
                     bool sourceChanged = !string.Equals(_lastMetrics.BindingSource, matched.Source, StringComparison.Ordinal);
@@ -531,10 +533,9 @@ namespace CodexInputUsage
                 }
 
                 _lastStripBounds = placed;
-                string matchInfo = matched != null ? matched.Detail : _lastMetrics.BindingSource;
                 LogState(string.Format("docked:{0} bounds={1} text=\"{2}\" thread={3}({4}) match=[{5}]",
                     dock.Source, placed, variant, MetricFormatter.ShortThreadId(_lastMetrics.ThreadId),
-                    _lastMetrics.BindingSource, matchInfo));
+                    _lastMetrics.BindingSource, _lastMatchDetail));
 
                 if (_popoverWanted)
                 {

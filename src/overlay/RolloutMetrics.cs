@@ -195,10 +195,14 @@ namespace CodexInputUsage
             internal string TurnId;
             internal bool Complete;
             internal DateTime? CompletedAtLocal;
+            internal long? StartedAtMs;
+            internal long? CompletedAtMs;
+            internal long? LastEventAtMs;
             internal long? TtftMs;
             internal long? WallDurationMs;
             internal Dictionary<string, UsageBag> Responses = new Dictionary<string, UsageBag>(StringComparer.Ordinal);
             internal Dictionary<string, Interval> ModelItems = new Dictionary<string, Interval>(StringComparer.Ordinal);
+            internal Dictionary<string, Interval> ToolItems = new Dictionary<string, Interval>(StringComparer.Ordinal);
         }
 
         private readonly JavaScriptSerializer _json = new JavaScriptSerializer { MaxJsonLength = 8 * 1024 * 1024 };
@@ -409,6 +413,9 @@ namespace CodexInputUsage
                     {
                         turn.Responses[key] = own;
                     }
+                    long? evMs = ParseTimestampMs(GetStr(row, "timestamp"));
+                    if (evMs.HasValue && (!turn.LastEventAtMs.HasValue || evMs.Value > turn.LastEventAtMs.Value))
+                        turn.LastEventAtMs = evMs.Value;
                     _contextUsed = own.Input;
                     _modernUsageSeen = true;
                 }
@@ -470,7 +477,9 @@ namespace CodexInputUsage
                 string turnId = GetStr(payload, "turn_id") ?? GetStr(GetDict(payload, "turn_attribution"), "turn_id");
                 if (!string.IsNullOrWhiteSpace(turnId))
                 {
-                    GetOrCreateTurn(turnId);
+                    var turn = GetOrCreateTurn(turnId);
+                    long? tsMs = ParseTimestampMs(GetStr(row, "timestamp"));
+                    if (tsMs.HasValue && !turn.StartedAtMs.HasValue) turn.StartedAtMs = tsMs.Value;
                     _activeTurnId = turnId;
                     _isStreaming = true;
                 }
@@ -484,7 +493,10 @@ namespace CodexInputUsage
                 if (string.IsNullOrWhiteSpace(turnId) || item == null) return false;
 
                 string itemType = GetStr(item, "type");
-                if (!IsModelOutputItem(itemType)) return false;
+                string itemKind = GetStr(item, "kind");
+                bool isModel = IsModelOutputItem(itemType);
+                bool isTool = IsToolItem(itemType, itemKind);
+                if (!isModel && !isTool) return false;
 
                 long? startMs = GetLong(payload, "started_at_ms");
                 long? endMs = GetLong(payload, "completed_at_ms");
@@ -494,7 +506,11 @@ namespace CodexInputUsage
 
                 string itemId = GetStr(item, "id") ?? (startMs.Value + "-" + endMs.Value);
                 var turn = GetOrCreateTurn(turnId);
-                turn.ModelItems[itemId] = new Interval { Start = startMs.Value, End = endMs.Value };
+                var iv = new Interval { Start = startMs.Value, End = endMs.Value };
+                if (isModel) turn.ModelItems[itemId] = iv;
+                else turn.ToolItems[itemId] = iv;
+                if (!turn.LastEventAtMs.HasValue || endMs.Value > turn.LastEventAtMs.Value)
+                    turn.LastEventAtMs = endMs.Value;
                 return true;
             }
 
@@ -516,6 +532,7 @@ namespace CodexInputUsage
                         DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out parsedTs))
                     {
                         turn.CompletedAtLocal = parsedTs.ToLocalTime();
+                        turn.CompletedAtMs = (long)(parsedTs - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
                     }
 
                     var summary = BuildTurnSummary(turn);
@@ -642,10 +659,10 @@ namespace CodexInputUsage
                 reason += r.Reasoning;
             }
             long total = inp + outp;
-            long modelMs = MergeIntervalsMs(turn.ModelItems.Values);
+            long modelMs = ComputeDurationWithoutToolsMs(turn);
 
             double? tps = null;
-            if (outp > 0 && modelMs > 0)
+            if (outp > 0 && modelMs >= 200)
             {
                 double v = outp * 1000.0 / modelMs;
                 if (!double.IsNaN(v) && !double.IsInfinity(v) && v > 0 && v <= MaxPlausibleTps)
@@ -671,11 +688,78 @@ namespace CodexInputUsage
             };
         }
 
-        private static long MergeIntervalsMs(IEnumerable<Interval> intervals)
+        private static long ComputeDurationWithoutToolsMs(MutableTurn turn)
+        {
+            // Match src/usage-state.mjs exact formula:
+            //   durationWithoutTools = turnWallDurationMs - (union(toolItems) minus overlap with modelItems)
+            // This properly includes model time spent generating tool-call arguments (which emit no
+            // Reasoning/AgentMessage item_completed) while strictly excluding tool execution time.
+            long wallMs;
+            long startMs;
+            long endMs;
+
+            if (turn.WallDurationMs.HasValue && turn.WallDurationMs.Value > 0 && turn.CompletedAtMs.HasValue)
+            {
+                wallMs = turn.WallDurationMs.Value;
+                endMs = turn.CompletedAtMs.Value;
+                startMs = endMs - wallMs;
+            }
+            else if (turn.StartedAtMs.HasValue && turn.LastEventAtMs.HasValue && turn.LastEventAtMs.Value > turn.StartedAtMs.Value)
+            {
+                startMs = turn.StartedAtMs.Value;
+                endMs = turn.LastEventAtMs.Value;
+                wallMs = endMs - startMs;
+            }
+            else
+            {
+                // Last-resort fallback if turn boundary timestamps were not observed
+                return MergeIntervalsMs(turn.ModelItems.Values);
+            }
+
+            var tools = new List<Interval>();
+            foreach (var iv in turn.ToolItems.Values)
+            {
+                long a = Math.Max(startMs, iv.Start);
+                long b = Math.Min(endMs, iv.End);
+                if (b > a) tools.Add(new Interval { Start = a, End = b });
+            }
+            var models = new List<Interval>();
+            foreach (var iv in turn.ModelItems.Values)
+            {
+                long a = Math.Max(startMs, iv.Start);
+                long b = Math.Min(endMs, iv.End);
+                if (b > a) models.Add(new Interval { Start = a, End = b });
+            }
+
+            var toolUnion = MergeIntervals(tools);
+            var modelUnion = MergeIntervals(models);
+            long toolMs = 0;
+            for (int i = 0; i < toolUnion.Count; i++)
+                toolMs += (toolUnion[i].End - toolUnion[i].Start);
+
+            // Preserve model activity that overlapped with tool execution
+            int mi = 0;
+            for (int i = 0; i < toolUnion.Count; i++)
+            {
+                long a = toolUnion[i].Start;
+                long b = toolUnion[i].End;
+                while (mi < modelUnion.Count && modelUnion[mi].End <= a) mi++;
+                for (int j = mi; j < modelUnion.Count && modelUnion[j].Start < b; j++)
+                {
+                    long overlap = Math.Min(b, modelUnion[j].End) - Math.Max(a, modelUnion[j].Start);
+                    if (overlap > 0) toolMs -= overlap;
+                }
+            }
+
+            long result = wallMs - Math.Max(0, toolMs);
+            return result > 0 ? result : 0;
+        }
+
+        private static List<Interval> MergeIntervals(IEnumerable<Interval> intervals)
         {
             var list = intervals.Where(x => x.End > x.Start).OrderBy(x => x.Start).ToList();
-            if (list.Count == 0) return 0;
-            long total = 0;
+            var merged = new List<Interval>();
+            if (list.Count == 0) return merged;
             long curStart = list[0].Start;
             long curEnd = list[0].End;
             for (int i = 1; i < list.Count; i++)
@@ -686,12 +770,21 @@ namespace CodexInputUsage
                 }
                 else
                 {
-                    total += (curEnd - curStart);
+                    merged.Add(new Interval { Start = curStart, End = curEnd });
                     curStart = list[i].Start;
                     curEnd = list[i].End;
                 }
             }
-            total += (curEnd - curStart);
+            merged.Add(new Interval { Start = curStart, End = curEnd });
+            return merged;
+        }
+
+        private static long MergeIntervalsMs(IEnumerable<Interval> intervals)
+        {
+            var merged = MergeIntervals(intervals);
+            long total = 0;
+            for (int i = 0; i < merged.Count; i++)
+                total += (merged[i].End - merged[i].Start);
             return total;
         }
 
@@ -701,6 +794,31 @@ namespace CodexInputUsage
             return string.Equals(itemType, "Reasoning", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(itemType, "AgentMessage", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(itemType, "Plan", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsToolItem(string itemType, string itemKind)
+        {
+            if (string.IsNullOrEmpty(itemType)) return false;
+            if (string.Equals(itemType, "Extension", StringComparison.OrdinalIgnoreCase))
+                return true;
+            return string.Equals(itemType, "CommandExecution", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(itemType, "FileChange", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(itemType, "McpToolCall", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(itemType, "WebSearch", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(itemType, "ImageView", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(itemType, "DynamicToolCall", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(itemType, "CollabAgentToolCall", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(itemType, "ImageGeneration", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static long? ParseTimestampMs(string ts)
+        {
+            DateTime parsed;
+            if (string.IsNullOrWhiteSpace(ts)) return null;
+            if (!DateTime.TryParse(ts, CultureInfo.InvariantCulture,
+                DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out parsed))
+                return null;
+            return (long)(parsed - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
         }
 
         private static UsageBag ParseUsage(Dictionary<string, object> dict)
