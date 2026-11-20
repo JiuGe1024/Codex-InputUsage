@@ -13,6 +13,10 @@ internal static class OverlayPrototype
     [DllImport("user32.dll")] private static extern bool SetProcessDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr hwnd);
+    [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr hwnd, out NativeRect rect);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRect { internal int Left, Top, Right, Bottom; }
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
     private static extern int GetApplicationUserModelId(IntPtr process, ref uint length, System.Text.StringBuilder id);
 
@@ -102,6 +106,12 @@ internal static class OverlayPrototype
         var obstacles = elements.Where(info => info.ControlType != ControlType.Document)
             .Select(info => Bounds(info.BoundingRectangle)).ToArray();
         var candidate = FindSpace(match.box, match.doc, screen, obstacles);
+        NativeRect window;
+        if (candidate.IsEmpty && GetWindowRect(hwnd, out window))
+        {
+            var frame = Rectangle.FromLTRB(window.Left, window.Top, window.Right, window.Bottom);
+            candidate = FindBelowWindow(match.box, frame, screen);
+        }
         return new Placement { Window = hwnd, Area = candidate, Reason = "no-clear-space-below-composer; editor=" + match.box + "; document=" + match.doc + "; work=" + screen + "; obstacles=" + string.Join("|", obstacles.Where(r => r.Bottom > match.box.Bottom && r.Left < match.box.Left + 380 && r.Right > match.box.Left).Select(r => r.ToString())) };
     }
 
@@ -117,6 +127,14 @@ internal static class OverlayPrototype
             if (visible.Contains(area) && !obstacles.Any(r => Rectangle.Inflate(r, 2, 2).IntersectsWith(area))) return area;
         }
         return Rectangle.Empty;
+    }
+
+    internal static Rectangle FindBelowWindow(Rectangle editor, Rectangle window, Rectangle workArea)
+    {
+        int left = Math.Max(editor.Left, workArea.Left);
+        int width = Math.Min(380, Math.Min(editor.Right, workArea.Right) - left);
+        var area = new Rectangle(left, window.Bottom + 4, width, 22);
+        return width >= 240 && workArea.Contains(area) ? area : Rectangle.Empty;
     }
 
     private sealed class Overlay : Form
@@ -135,7 +153,7 @@ internal static class OverlayPrototype
             pill = new Button {
                 Dock = DockStyle.Fill, FlatStyle = FlatStyle.Flat, BackColor = Color.FromArgb(35, 38, 42),
                 ForeColor = Color.WhiteSmoke, Font = new Font("Times New Roman", 10),
-                Text = "最近一轮 --   ·   会话累计 --   ·   缓存 --"
+                Text = "Token 用量    本轮 --   ·   累计 --   ·   缓存 --"
             };
             pill.FlatAppearance.BorderSize = 0;
             pill.Click += ToggleDetails;

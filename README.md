@@ -18,6 +18,6 @@ InputUsage 和原 TokenBar 各自使用独立源码、运行状态。两者共�
 
 ## 无 CDP 浮层原型
 
-运行 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/Build-OverlayPrototype.ps1` 构建原型，生成 `outputs/Codex-InputUsage-Overlay.exe`。原型从正在运行的官方 Codex 读取 Windows 无障碍控件坐标，在前台窗口内寻找输入区下方的空位。空位不足、输入框识别不明确或切到其他应用时隐藏。左键展开，右键退出。
+运行 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/Build-OverlayPrototype.ps1` 构建原型，生成 `outputs/Codex-InputUsage-Overlay.exe`。原型从正在运行的官方 Codex 读取 Windows 无障碍控件坐标，在前台窗口内寻找输入区下方的空位。窗口内部空间不足时，改贴到窗口下边缘，前提是屏幕工作区有空位。仍无空位、输入框识别不明确或切到其他应用时隐藏。左键展开，右键退出。
 
 当前原型用于验证定位和交互，用量显示 `--`。本机已确认输入框与原生工具栏下方有可用空间，模拟空间不足时也通过了隐藏检查。无障碍树中的可见元素未提供会话 UUID，钩子自动启动和会话绑定尚未接入。
