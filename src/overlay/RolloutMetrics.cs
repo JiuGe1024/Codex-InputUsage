@@ -44,7 +44,11 @@ namespace CodexInputUsage
 
         // Context window
         internal long ContextUsedTokens;
+        internal long ContextCachedTokens;
+        internal long ContextUncachedInputTokens;
+        internal long ContextLastOutputTokens;
         internal long ContextWindowTokens;
+        internal long ContextRemainingTokens;
         internal double? ContextPct;
 
         // Rate limits (5h primary, 7d secondary)
@@ -147,23 +151,25 @@ namespace CodexInputUsage
         internal static string[] BuildStripVariants(SessionMetricsSnapshot snap)
         {
             string tps = snap != null ? FormatTps(snap.DisplayTps, snap.TpsIsHeld) : "--";
-            string turn = (snap != null && snap.LatestTurn != null && snap.LatestTurn.TotalTokens > 0)
-                ? CompactTokens(snap.LatestTurn.TotalTokens)
-                : "--";
+            bool hasTurn = snap != null && snap.LatestTurn != null && snap.LatestTurn.TotalTokens > 0;
+            string turn = hasTurn ? CompactTokens(snap.LatestTurn.TotalTokens) : "--";
+            string turnCache = hasTurn ? FormatCacheCompact(snap.LatestTurn.CacheHitPct) : "--";
             string total = (snap != null && snap.HasUsage) ? CompactTokens(snap.TotalTokens) : "--";
             string cache = (snap != null && snap.HasUsage) ? FormatCacheCompact(snap.SessionCacheHitPct) : "--";
 
             return new string[]
             {
-                // Level 0: Full strip with TPS + latest turn + session cumulative + cache rate
-                string.Format("\u26A1 {0} tok/s \u00B7 \u672C\u8F6E {1} \u00B7 \u7D2F\u8BA1 {2} \u00B7 \u7F13\u5B58 {3}", tps, turn, total, cache),
-                // Level 1: Compact 4-metric form
-                string.Format("\u26A1 {0}/s \u00B7 \u8F6E {1} \u00B7 \u7D2F {2} \u00B7 {3}", tps, turn, total, cache),
-                // Level 2: Narrower — preserve required 3 metrics (latest turn + cumulative + cache)
-                string.Format("\u672C\u8F6E {0} \u00B7 \u7D2F\u8BA1 {1} \u00B7 {2}", turn, total, cache),
-                // Level 3: Very narrow
-                string.Format("{0} / {1} \u00B7 {2}", turn, total, cache),
-                // Level 4: Extreme narrow fallback
+                // Level 0: Full 5-metric strip (TPS + latest turn + turn cache + session total + session cache)
+                string.Format("\u26A1 {0} tok/s \u00B7 \u672C\u8F6E {1} \u7F13{2} \u00B7 \u7D2F\u8BA1 {3} \u7F13{4}", tps, turn, turnCache, total, cache),
+                // Level 1: Compact 5-metric form
+                string.Format("\u26A1 {0}/s \u00B7 \u672C\u8F6E {1} ({2}) \u00B7 \u7D2F\u8BA1 {3} ({4})", tps, turn, turnCache, total, cache),
+                // Level 2: Narrow 5-metric form
+                string.Format("\u26A1 {0}/s \u00B7 \u8F6E {1}/{2} \u00B7 \u7D2F {3}/{4}", tps, turn, turnCache, total, cache),
+                // Level 3: Drop TPS, keep turn + turn cache + cumulative + cumulative cache
+                string.Format("\u672C\u8F6E {0} \u7F13{1} \u00B7 \u7D2F\u8BA1 {2} \u7F13{3}", turn, turnCache, total, cache),
+                // Level 4: Very narrow
+                string.Format("{0}/{1} \u00B7 {2}/{3}", turn, turnCache, total, cache),
+                // Level 5: Extreme narrow fallback
                 string.Format("{0} \u00B7 {1}", total, cache)
             };
         }
@@ -227,6 +233,8 @@ namespace CodexInputUsage
         private bool _hasUsage;
 
         private long _contextUsed;
+        private long _contextCached;
+        private long _contextLastOutput;
         private long _contextWindow;
 
         private double? _primaryUsedPct;
@@ -260,6 +268,8 @@ namespace CodexInputUsage
             _cumTotal = 0;
             _hasUsage = false;
             _contextUsed = 0;
+            _contextCached = 0;
+            _contextLastOutput = 0;
             _contextWindow = 0;
             _primaryUsedPct = null;
             _primaryResetsAt = null;
@@ -417,6 +427,8 @@ namespace CodexInputUsage
                     if (evMs.HasValue && (!turn.LastEventAtMs.HasValue || evMs.Value > turn.LastEventAtMs.Value))
                         turn.LastEventAtMs = evMs.Value;
                     _contextUsed = own.Input;
+                    _contextCached = own.Cached;
+                    _contextLastOutput = own.Output;
                     _modernUsageSeen = true;
                 }
 
@@ -440,7 +452,12 @@ namespace CodexInputUsage
                     if (cw.HasValue && cw.Value > 0) _contextWindow = cw.Value;
 
                     var lastUsage = ParseUsage(GetDict(info, "last_token_usage"));
-                    if (lastUsage != null && lastUsage.Input > 0) _contextUsed = lastUsage.Input;
+                    if (lastUsage != null && lastUsage.Input > 0)
+                    {
+                        _contextUsed = lastUsage.Input;
+                        _contextCached = lastUsage.Cached;
+                        _contextLastOutput = lastUsage.Output;
+                    }
 
                     if (!_modernUsageSeen)
                     {
@@ -568,7 +585,11 @@ namespace CodexInputUsage
                 TotalTokens = _cumTotal > 0 ? _cumTotal : (_cumInput + _cumOutput),
                 SessionCacheHitPct = _cumInput > 0 ? (double?)(_cumCached * 100.0 / _cumInput) : null,
                 ContextUsedTokens = _contextUsed,
+                ContextCachedTokens = Math.Min(_contextCached, _contextUsed),
+                ContextUncachedInputTokens = Math.Max(0, _contextUsed - _contextCached),
+                ContextLastOutputTokens = _contextLastOutput,
                 ContextWindowTokens = _contextWindow,
+                ContextRemainingTokens = _contextWindow > 0 ? Math.Max(0, _contextWindow - _contextUsed) : 0,
                 ContextPct = (_contextWindow > 0 && _contextUsed > 0)
                     ? (double?)Math.Min(100.0, _contextUsed * 100.0 / _contextWindow)
                     : null,
@@ -581,7 +602,7 @@ namespace CodexInputUsage
             for (int i = 0; i < _turnsOrdered.Count; i++)
             {
                 var summary = BuildTurnSummary(_turnsOrdered[i]);
-                if (summary.TotalTokens > 0 || summary.Complete)
+                if (summary.TotalTokens > 0)
                     snap.Turns.Add(summary);
             }
 

@@ -204,27 +204,47 @@ namespace CodexInputUsage
                 testThread = liveIpc.FollowedThreadIds[0];
 
             string targetRollout = explicitRolloutPath;
+            string effectiveThread = string.IsNullOrWhiteSpace(explicitRolloutPath) ? testThread : null;
             if (string.IsNullOrWhiteSpace(targetRollout) && !string.IsNullOrWhiteSpace(testThread))
                 targetRollout = CodexStateDb.FindRolloutFileByThreadId(testThread);
 
             var tracker = new RolloutSessionTracker();
-            tracker.UpdateFromDisk(testThread, "IPC+标题", targetRollout);
+            tracker.UpdateFromDisk(effectiveThread, "IPC+标题", targetRollout);
             var snap = tracker.BuildSnapshot();
-            sb.AppendLine(string.Format("check_thread={0} rollout={1}", testThread ?? "(none)", targetRollout ?? "(none)"));
-            sb.AppendLine(string.Format("metrics hasUsage={0} latestTurn={1} total={2} input={3} cached={4} output={5} cachePct={6} tps={7} ttft={8} ctx={9}/{10} turns={11}",
+            sb.AppendLine(string.Format("check_thread={0} rollout={1}", effectiveThread ?? "(explicit)", targetRollout ?? "(none)"));
+            sb.AppendLine(string.Format("metrics hasUsage={0} latestTurn={1} turnCache={2} total={3} input={4} cached={5} output={6} cachePct={7} tps={8} ttft={9} ctx={10}/{11} (cached={12} uncached={13} rem={14}) turns={15}",
                 snap.HasUsage,
                 snap.LatestTurn != null ? snap.LatestTurn.TotalTokens : 0,
+                snap.LatestTurn != null ? MetricFormatter.FormatCachePrecise(snap.LatestTurn.CacheHitPct) : "--",
                 snap.TotalTokens, snap.InputTokens, snap.CachedInputTokens, snap.OutputTokens,
                 MetricFormatter.FormatCachePrecise(snap.SessionCacheHitPct),
                 MetricFormatter.FormatTps(snap.DisplayTps, snap.TpsIsHeld),
                 MetricFormatter.FormatSeconds(snap.LatestTtftMs),
-                snap.ContextUsedTokens, snap.ContextWindowTokens, snap.Turns.Count));
+                snap.ContextUsedTokens, snap.ContextWindowTokens,
+                snap.ContextCachedTokens, snap.ContextUncachedInputTokens, snap.ContextRemainingTokens,
+                snap.Turns.Count));
 
             string[] variants = MetricFormatter.BuildStripVariants(snap);
-            sb.AppendLine("strip0=" + variants[0]);
+            for (int i = 0; i < variants.Length; i++)
+                sb.AppendLine("strip" + i + "=" + variants[i]);
 
             string workDir = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, @"..\work"));
             Directory.CreateDirectory(workDir);
+            using (var bmp = StripForm.RenderPreviewBitmap(variants[0], ThemePalette.Light, false, true))
+            {
+                bmp.Save(Path.Combine(workDir, "preview-strip-light.png"), ImageFormat.Png);
+                sb.AppendLine("strip0_px=" + bmp.Width + "x" + bmp.Height);
+            }
+            using (var bmp = StripForm.RenderPreviewBitmap(variants[1], ThemePalette.Light, false, true))
+            {
+                bmp.Save(Path.Combine(workDir, "preview-strip-compact-light.png"), ImageFormat.Png);
+                sb.AppendLine("strip1_px=" + bmp.Width + "x" + bmp.Height);
+            }
+            using (var bmp = DetailPopoverForm.RenderPreviewBitmap(snap, ThemePalette.Light))
+                bmp.Save(Path.Combine(workDir, "preview-detail-light.png"), ImageFormat.Png);
+            using (var bmp = DetailPopoverForm.RenderPreviewBitmap(snap, ThemePalette.Dark))
+                bmp.Save(Path.Combine(workDir, "preview-detail-dark.png"), ImageFormat.Png);
+
             File.WriteAllText(Path.Combine(workDir, "selftest-report.txt"), sb.ToString(), Encoding.UTF8);
         }
 
