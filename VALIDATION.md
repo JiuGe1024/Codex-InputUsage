@@ -1,0 +1,38 @@
+# Codex InputUsage 验证记录
+
+更新于 2026-11-21。当前最新代码提交：`592f1dc`。
+
+## 已实测通过
+
+### 1. 构建与零警告检查
+- 命令：`powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/Build-OverlayPrototype.ps1`
+- 结果：退出码 0，0 错误 0 警告，产物 `outputs/Codex-InputUsage-Overlay.exe`（124,416 字节）。
+
+### 2. 路由与零猜测会话匹配（`--self-test`）
+- 单测结果：`match_tests pool=True header=True bodyTieBreak=True refuseAmbig=True disconnectClear=True`
+  - 多活跃流同窗订阅池（3 候选）保留完整不覆盖；
+  - 标题唯一匹配锁定正确会话（`IPC+标题`）；
+  - 同名对话通过可见正文唯一消歧（`IPC+正文`）；
+  - 多候选且前台无法唯一确认时拒绝猜测并清空（`待确认`）；
+  - IPC 断线立即清空旧值显示 `--`（`IPC 断线`）。
+- 实机现场日志（`work/overlay-diag.log`）：9 个同时活跃流下通过 `IPC+正文`（`bodyScore=4, second=0`）正确锁定当前前台对话。
+
+### 3. 数据口径核对（对比原版 TokenBar 与 SQLite）
+- 测试样本：`rollout-2026-11-08T14-31-26-01a1b9da-c9ed-7163-a8be-ef01576cc0aa.jsonl`（52 轮，含压缩历史）
+  - 最近一轮：`811,833`（原版 TokenBar：`811.83k`），本轮缓存：`99.49%`（原版：`99.49%`）
+  - 会话累计：`68,647,453`（原版 TokenBar：`68,647.45k`），累计缓存：`97.41%`（原版：`97.41%`）
+  - TPS：修正后最近 6 轮稳定在 `40.9–50.2 tok/s`（最后一轮 `47 tok/s`，模型耗时 `43.7s` = 整轮 `45.9s` - 工具 `2.2s`），修复了旧口径遗漏工具调用参数生成耗时导致的 `350 tok/s` 虚高
+  - 十通道上下文和：`271,654 == 官方 271,654`（`用户消息 87,226 / 模型回复 76,740 / 工具结果 74,370 / 系统提示词 16,532 / 系统工具 7,798 / 压缩摘要 5,824 / MCP 工具 2,082 / Skill 696 / 用户规则 386 / 子代理通知 0`）
+
+### 4. MCP 原生伴随启动握手
+- 执行 `scripts/Install-AutoStart.ps1`：已移除遗留 `HKCU\...\Run\CodexInputUsageOverlay`，写入 `~/.codex/config.toml` 的 `[mcp_servers.codex_input_usage]`。
+- 执行 `node scripts/codex-mcp-companion.mjs` 握手测试：`initialize` 正常响应，`tools/list` 返回 `{"tools":[]}`，退出码 0。
+
+### 5. 视觉与排版核对
+- 离屏渲染预览（`work/preview-strip-light.png`、`work/preview-strip-dark.png`、`work/preview-detail-light.png`、`work/preview-detail-dark.png`）已逐张目视核对：
+  - 常驻条完整档 `328×24px`（实机工具栏可用空位实测 `349px`），矢量琥珀金闪电、整数缓存柔色微胶囊、明暗主题均清晰无截断；
+  - 详情面板两位小数缓存率、十通道分段条与 2×5 清单、逐轮明细表排版对齐正常。
+- 用户实机交互验收：用户已确认原生启动、停靠外观、对话切换、TPS 速度、本轮缓存率、十通道上下文与响应优化整体满意。
+
+## 未在本终端执行的验证边界
+- 受限于代理终端隔离桌面 `exebox-...`，`592f1dc` 的 60 FPS 拖动跟手度与高 DPI（>100%）多屏缩放未在代理终端内自动截屏验证；其中 96 DPI 真实桌面交互由用户本人目视确认。
