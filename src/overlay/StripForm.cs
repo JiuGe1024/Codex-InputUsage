@@ -103,6 +103,7 @@ namespace CodexInputUsage
 
         private const int StripHeightPx = 24;
         private const int PaddingXPx = 7;
+        private const int BoltSlotPx = 12;
         private const int PillGapPx = 5;
         private const int PillPadXPx = 6;
         private const int PillHeightPx = 18;
@@ -134,7 +135,7 @@ namespace CodexInputUsage
             {
                 if (StripClicked != null) StripClicked(this, EventArgs.Empty);
             });
-            _autoStartItem = new ToolStripMenuItem("开机自启（跟随原生 Codex）") { CheckOnClick = false };
+            _autoStartItem = new ToolStripMenuItem("跟随原生 Codex 自动启动") { CheckOnClick = false };
             _autoStartItem.Click += delegate
             {
                 if (AutoStartToggled != null) AutoStartToggled(this, EventArgs.Empty);
@@ -393,7 +394,6 @@ namespace CodexInputUsage
 
             using (var textFont = new Font("Microsoft YaHei UI", 8.8f, FontStyle.Regular, GraphicsUnit.Point))
             using (var pillFont = new Font("Segoe UI Semibold", 8.5f, FontStyle.Regular, GraphicsUnit.Point))
-            using (var iconFont = new Font("Segoe UI", 8.5f, FontStyle.Regular, GraphicsUnit.Point))
             using (var mainBrush = new SolidBrush(palette.StripText))
             using (var mutedBrush = new SolidBrush(palette.StripTextSecondary))
             using (var fmt = (StringFormat)StringFormat.GenericTypographic.Clone())
@@ -404,11 +404,12 @@ namespace CodexInputUsage
                 string body = model.PrefixText ?? string.Empty;
                 if (body.StartsWith("\u26A1 ", StringComparison.Ordinal))
                 {
-                    string glyph = "\u26A1";
-                    SizeF iconSz = g.MeasureString(glyph, iconFont, 1000, fmt);
-                    float iconY = (size.Height - iconSz.Height) / 2f;
-                    g.DrawString(glyph, iconFont, mutedBrush, x, iconY, fmt);
-                    x += iconSz.Width + 3f;
+                    // Crisp vector lightning bolt in warm amber-gold so it stands out cleanly
+                    Color boltColor = palette.Kind == CodexThemeKind.Dark
+                        ? Color.FromArgb(250, 251, 184, 52)
+                        : Color.FromArgb(250, 232, 126, 20);
+                    DrawLightningBolt(g, x, (size.Height - 13f) / 2f, boltColor);
+                    x += BoltSlotPx;
                     body = body.Substring(2);
                 }
 
@@ -486,6 +487,21 @@ namespace CodexInputUsage
             }
         }
 
+        private static void DrawLightningBolt(Graphics g, float x, float y, Color color)
+        {
+            var pts = new PointF[]
+            {
+                new PointF(x + 5.6f, y + 0.2f),
+                new PointF(x + 0.6f, y + 7.0f),
+                new PointF(x + 4.4f, y + 7.0f),
+                new PointF(x + 3.2f, y + 12.8f),
+                new PointF(x + 8.6f, y + 5.6f),
+                new PointF(x + 4.8f, y + 5.6f)
+            };
+            using (var brush = new SolidBrush(color))
+                g.FillPolygon(brush, pts);
+        }
+
         private static int MeasureModelWidth(StripRenderModel model)
         {
             if (model == null) return 0;
@@ -493,7 +509,6 @@ namespace CodexInputUsage
             using (var g = Graphics.FromImage(bmp))
             using (var textFont = new Font("Microsoft YaHei UI", 8.8f, FontStyle.Regular, GraphicsUnit.Point))
             using (var pillFont = new Font("Segoe UI Semibold", 8.5f, FontStyle.Regular, GraphicsUnit.Point))
-            using (var iconFont = new Font("Segoe UI", 8.5f, FontStyle.Regular, GraphicsUnit.Point))
             using (var fmt = (StringFormat)StringFormat.GenericTypographic.Clone())
             {
                 g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
@@ -503,7 +518,7 @@ namespace CodexInputUsage
                 string body = model.PrefixText ?? string.Empty;
                 if (body.StartsWith("\u26A1 ", StringComparison.Ordinal))
                 {
-                    width += g.MeasureString("\u26A1", iconFont, 1000, fmt).Width + 3f;
+                    width += BoltSlotPx;
                     body = body.Substring(2);
                 }
                 width += g.MeasureString(body, textFont, 1000, fmt).Width;

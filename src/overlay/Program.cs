@@ -7,56 +7,108 @@ using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
 namespace CodexInputUsage
 {
-    internal static class AutoStartManager
+    internal static class CodexCompanionManager
     {
-        private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
-        private const string ValueName = "CodexInputUsageOverlay";
+        private const string LegacyRunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
+        private const string LegacyValueName = "CodexInputUsageOverlay";
+        private static readonly Regex SectionRegex = new Regex(
+            @"(?ms)\r?\n?\[mcp_servers\.codex_input_usage\]\r?\n(?:(?!\[).*(?:\r?\n|$))*",
+            RegexOptions.Compiled);
 
-        internal static string GetExecutablePath()
+        private static string GetConfigPath()
         {
-            return Process.GetCurrentProcess().MainModule.FileName;
+            return Path.Combine(CodexThemeSource.GetCodexHome(), "config.toml");
+        }
+
+        private static string GetCompanionScriptPath()
+        {
+            return Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, @"..\scripts\codex-mcp-companion.mjs"));
+        }
+
+        private static string FindNodeExecutable()
+        {
+            string[] candidates = new string[]
+            {
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), @"nodejs\node.exe"),
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), @"nodejs\node.exe")
+            };
+            for (int i = 0; i < candidates.Length; i++)
+            {
+                if (File.Exists(candidates[i])) return candidates[i];
+            }
+            string pathEnv = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
+            string[] dirs = pathEnv.Split(';');
+            for (int i = 0; i < dirs.Length; i++)
+            {
+                string d = dirs[i].Trim();
+                if (d.Length == 0) continue;
+                try
+                {
+                    string p = Path.Combine(d, "node.exe");
+                    if (File.Exists(p)) return p;
+                }
+                catch { }
+            }
+            return "node.exe";
+        }
+
+        private static void CleanupLegacyRunKey()
+        {
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(LegacyRunKeyPath, true))
+                {
+                    if (key != null && key.GetValue(LegacyValueName) != null)
+                        key.DeleteValue(LegacyValueName, false);
+                }
+            }
+            catch { }
         }
 
         internal static bool IsEnabled()
         {
             try
             {
-                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(RunKeyPath, false))
-                {
-                    if (key == null) return false;
-                    string raw = key.GetValue(ValueName) as string;
-                    if (string.IsNullOrWhiteSpace(raw)) return false;
-                    string trimmed = raw.Trim().Trim('"');
-                    return string.Equals(trimmed, GetExecutablePath(), StringComparison.OrdinalIgnoreCase);
-                }
+                string cfg = GetConfigPath();
+                if (!File.Exists(cfg)) return false;
+                string text = File.ReadAllText(cfg, Encoding.UTF8);
+                return SectionRegex.IsMatch(text);
             }
             catch { return false; }
         }
 
         internal static bool SetEnabled(bool enable)
         {
+            CleanupLegacyRunKey();
             try
             {
-                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(RunKeyPath, true))
+                string cfg = GetConfigPath();
+                if (!File.Exists(cfg)) return false;
+                string content = File.ReadAllText(cfg, Encoding.UTF8);
+                string cleaned = SectionRegex.Replace(content, string.Empty).TrimEnd();
+                string next;
+                if (enable)
                 {
-                    if (key == null) return false;
-                    if (enable)
-                    {
-                        key.SetValue(ValueName, "\"" + GetExecutablePath() + "\"", RegistryValueKind.String);
-                    }
-                    else
-                    {
-                        if (key.GetValue(ValueName) != null)
-                            key.DeleteValue(ValueName, false);
-                    }
-                    return true;
+                    string node = FindNodeExecutable();
+                    string script = GetCompanionScriptPath();
+                    next = cleaned
+                        + "\r\n\r\n[mcp_servers.codex_input_usage]\r\n"
+                        + "command = '" + node + "'\r\n"
+                        + "args = ['" + script + "']\r\n";
                 }
+                else
+                {
+                    next = cleaned + "\r\n";
+                }
+                File.WriteAllText(cfg, next, new UTF8Encoding(false));
+                return true;
             }
             catch { return false; }
         }
@@ -93,6 +145,8 @@ namespace CodexInputUsage
                 return;
             }
 
+            bool exitWithCodex = args.Any(a => string.Equals(a, "--exit-with-codex", StringComparison.OrdinalIgnoreCase));
+
             bool owns;
             using (var single = new Mutex(true, @"Local\CodexInputUsage.OverlayPrototype", out owns))
             {
@@ -103,10 +157,10 @@ namespace CodexInputUsage
                 }
 
                 ResetDiagFiles();
-                LogStartup();
+                LogStartup(exitWithCodex);
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
-                using (var app = new OverlayController())
+                using (var app = new OverlayController(exitWithCodex))
                 {
                     Application.Run(app);
                 }
@@ -317,15 +371,15 @@ namespace CodexInputUsage
             }
         }
 
-        private static void LogStartup()
+        private static void LogStartup(bool exitWithCodex)
         {
             uint dpi = 0;
             try { dpi = NativeWin32.GetDpiForSystem(); } catch { }
             string screens = string.Join("; ", Screen.AllScreens.Select(s =>
                 string.Format("{0}(Bounds={1} Work={2})", s.DeviceName, s.Bounds, s.WorkingArea)).ToArray());
-            LogDiag(string.Format("startup pid={0} desktop={1} dpi={2} theme={3} autostart={4} screens=[{5}]",
+            LogDiag(string.Format("startup pid={0} desktop={1} dpi={2} theme={3} codexCompanion={4} exitWithCodex={5} screens=[{6}]",
                 Process.GetCurrentProcess().Id, NativeWin32.GetDesktopName(), dpi,
-                CodexThemeSource.Current, AutoStartManager.IsEnabled(), screens));
+                CodexThemeSource.Current, CodexCompanionManager.IsEnabled(), exitWithCodex, screens));
         }
 
         private static Icon CreateTrayIcon()
@@ -382,12 +436,17 @@ namespace CodexInputUsage
             private string _lastDiagState = string.Empty;
             private string _lastMatchDetail = string.Empty;
             private string _lastFingerprintSig = string.Empty;
+            private readonly bool _exitWithCodex;
+            private readonly DateTime _startedUtc = DateTime.UtcNow;
+            private DateTime _codexMissingSinceUtc = DateTime.MinValue;
+            private bool _everSawCodex;
             private bool _codexRunning;
             private bool _capturedOnce;
             private bool _popoverWanted;
 
-            internal OverlayController()
+            internal OverlayController(bool exitWithCodex)
             {
+                _exitWithCodex = exitWithCodex;
                 _dockTracker = new ComposerDockTracker(delegate { return _activeCodexHwnd; });
                 _strip.StripClicked += OnStripClicked;
                 _strip.AutoStartToggled += OnAutoStartToggled;
@@ -403,7 +462,7 @@ namespace CodexInputUsage
 
                 var trayMenu = new ContextMenuStrip();
                 _trayStatusItem = new ToolStripMenuItem("状态：等待原生 Codex 启动") { Enabled = false };
-                _trayAutoStartItem = new ToolStripMenuItem("开机自启（跟随原生 Codex）") { CheckOnClick = false };
+                _trayAutoStartItem = new ToolStripMenuItem("跟随原生 Codex 自动启动") { CheckOnClick = false };
                 _trayAutoStartItem.Click += OnAutoStartToggled;
                 trayMenu.Items.Add(_trayStatusItem);
                 trayMenu.Items.Add(new ToolStripSeparator());
@@ -413,7 +472,7 @@ namespace CodexInputUsage
                 _trayIcon = new NotifyIcon
                 {
                     Icon = CreateTrayIcon(),
-                    Text = "Codex InputUsage — 等待原生 Codex",
+                    Text = "Codex InputUsage — 跟随原生 Codex",
                     ContextMenuStrip = trayMenu,
                     Visible = true
                 };
@@ -428,17 +487,17 @@ namespace CodexInputUsage
 
             private void SyncAutoStartMenuState()
             {
-                bool enabled = AutoStartManager.IsEnabled();
+                bool enabled = CodexCompanionManager.IsEnabled();
                 _strip.SetAutoStartChecked(enabled);
                 _trayAutoStartItem.Checked = enabled;
             }
 
             private void OnAutoStartToggled(object sender, EventArgs e)
             {
-                bool target = !AutoStartManager.IsEnabled();
-                AutoStartManager.SetEnabled(target);
+                bool target = !CodexCompanionManager.IsEnabled();
+                CodexCompanionManager.SetEnabled(target);
                 SyncAutoStartMenuState();
-                Program.LogDiag("autostart toggled -> " + AutoStartManager.IsEnabled());
+                Program.LogDiag("codex companion auto-launch toggled -> " + CodexCompanionManager.IsEnabled());
             }
 
             private void OnStripClicked(object sender, EventArgs e)
@@ -495,9 +554,24 @@ namespace CodexInputUsage
                     bool running = NativeWin32.HasRunningCodexProcess();
                     if (!running)
                     {
+                        if (_exitWithCodex)
+                        {
+                            if (_codexMissingSinceUtc == DateTime.MinValue) _codexMissingSinceUtc = now;
+                            bool graceDone = _everSawCodex
+                                ? (now - _codexMissingSinceUtc).TotalSeconds >= 3.0
+                                : (now - _startedUtc).TotalSeconds >= 15.0;
+                            if (graceDone)
+                            {
+                                Program.LogDiag("codex exited -> closing overlay (--exit-with-codex)");
+                                ExitThread();
+                                return;
+                            }
+                        }
                         if (_codexRunning || _uiTimer.Interval != StandbyPollMs) EnterStandby();
                         return;
                     }
+                    _everSawCodex = true;
+                    _codexMissingSinceUtc = DateTime.MinValue;
                     if (!_codexRunning) WakeForCodex();
                 }
 
