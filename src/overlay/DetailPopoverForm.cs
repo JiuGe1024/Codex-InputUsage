@@ -16,14 +16,14 @@ namespace CodexInputUsage
         private const int WmMouseActivate = 0x0021;
         private const int MaNoActivate = 3;
 
-        private const int PopoverWidth = 486;
+        private const int PopoverWidth = 496;
         private const int Pad = 14;
         private const int HeaderHeight = 36;
         private const int CardGridHeight = 140;
-        private const int ContextBarHeight = 82;
+        private const int ContextBarHeight = 186;
         private const int TableHeaderHeight = 46;
         private const int RowHeight = 24;
-        private const int MaxVisibleRows = 7;
+        private const int MaxVisibleRows = 6;
 
         private ThemePalette _palette = ThemePalette.Light;
         private SessionMetricsSnapshot _snapshot = new SessionMetricsSnapshot();
@@ -220,30 +220,31 @@ namespace CodexInputUsage
                     snap.IsStreaming ? "输出速度 (生成中)" : "输出速度 (TPS)",
                     tpsHero, tpsSub, tpsColor, pal, labelFont, heroFont, subFont);
 
-                // Card 2: Cache Hit Rate (Turn / Session)
+                // Card 2: Cache Hit Rate (Turn / Session — 2 decimal places in popover)
                 var latest = snap.LatestTurn;
                 double? turnCachePct = latest != null ? latest.CacheHitPct : null;
                 double? sessCachePct = snap.SessionCacheHitPct;
                 string cacheHero;
                 if (turnCachePct.HasValue && sessCachePct.HasValue)
-                    cacheHero = string.Format("{0} / {1}", MetricFormatter.FormatCachePrecise(turnCachePct), MetricFormatter.FormatCachePrecise(sessCachePct));
+                    cacheHero = string.Format("{0} / {1}", MetricFormatter.FormatCacheTwoDecimals(turnCachePct), MetricFormatter.FormatCacheTwoDecimals(sessCachePct));
                 else
-                    cacheHero = MetricFormatter.FormatCachePrecise(turnCachePct ?? sessCachePct);
+                    cacheHero = MetricFormatter.FormatCacheTwoDecimals(turnCachePct ?? sessCachePct);
                 string cacheSub = snap.HasUsage
                     ? string.Format("累计命中 {0} / {1}", MetricFormatter.CompactTokens(snap.CachedInputTokens), MetricFormatter.CompactTokens(snap.InputTokens))
                     : "等待会话数据";
                 double? tierPct = turnCachePct ?? sessCachePct;
                 Color cacheColor = tierPct.HasValue ? pal.ForTier(MetricFormatter.ClassifyCache(tierPct)) : pal.TextMuted;
-                DrawKpiCard(g, new Rectangle(Pad + cardW + gap, gridTop, cardW, cardH),
-                    "缓存命中率 (本轮 / 累计)", cacheHero, cacheSub, cacheColor, pal, labelFont, heroFont, subFont);
+                using (var cacheHeroFont = new Font("Segoe UI Semibold", 11.8f, FontStyle.Regular, GraphicsUnit.Point))
+                    DrawKpiCard(g, new Rectangle(Pad + cardW + gap, gridTop, cardW, cardH),
+                        "缓存命中率 (本轮 / 累计)", cacheHero, cacheSub, cacheColor, pal, labelFont, cacheHeroFont, subFont);
 
                 // Card 3: Latest Turn
                 string turnHero = latest != null ? MetricFormatter.CompactTokens(latest.TotalTokens) : "--";
                 string turnSub = latest != null
-                    ? string.Format("入 {0} · 出 {1} · 缓 {2}",
+                    ? string.Format("入 {0} · 出 {1} · 缓存 {2}",
                         MetricFormatter.CompactTokens(latest.InputTokens),
                         MetricFormatter.CompactTokens(latest.OutputTokens),
-                        MetricFormatter.FormatCachePrecise(latest.CacheHitPct))
+                        MetricFormatter.FormatCacheTwoDecimals(latest.CacheHitPct))
                     : "尚无已完成轮次";
                 DrawKpiCard(g, new Rectangle(Pad, gridTop + cardH + gap, cardW, cardH),
                     latest != null ? ("最近一轮 #" + latest.Index) : "最近一轮",
@@ -368,8 +369,8 @@ namespace CodexInputUsage
             Graphics g, int width, int y, SessionMetricsSnapshot snap, ThemePalette pal,
             Font labelFont, Font subFont, Font monoBoldFont)
         {
-            var cardRect = new Rectangle(Pad, y + 4, width - (Pad * 2), ContextBarHeight - 12);
-            using (var cardPath = StripForm.CreateRoundedPath(cardRect, 6))
+            var cardRect = new Rectangle(Pad, y + 4, width - (Pad * 2), ContextBarHeight - 10);
+            using (var cardPath = StripForm.CreateRoundedPath(cardRect, 7))
             using (var cardFill = new SolidBrush(pal.CardBg))
             using (var cardPen = new Pen(pal.Border, 1f))
             {
@@ -377,129 +378,167 @@ namespace CodexInputUsage
                 g.DrawPath(cardPen, cardPath);
             }
 
-            int innerX = cardRect.X + 10;
-            int innerW = cardRect.Width - 20;
+            int innerX = cardRect.X + 12;
+            int innerW = cardRect.Width - 24;
 
-            // Row 1: Title + Used / Limit (%) on left, Remaining on right
-            using (var titleBrush = new SolidBrush(pal.TextPrimary))
-            using (var secBrush = new SolidBrush(pal.TextSecondary))
+            // Row 1: Stacked-layers icon + bold "上下文窗口" on left; right-aligned "271.7k / 475.0k (57.2%)"
+            DrawLayersIcon(g, innerX, cardRect.Y + 9, pal.TextPrimary);
+            using (var hdrFont = new Font("Microsoft YaHei UI", 9.0f, FontStyle.Bold, GraphicsUnit.Point))
+            using (var hdrBrush = new SolidBrush(pal.TextPrimary))
+                g.DrawString("上下文窗口", hdrFont, hdrBrush, innerX + 18, cardRect.Y + 8);
+
+            string rightUsage = snap.ContextWindowTokens > 0
+                ? string.Format("{0} / {1} ({2:0.0}%)",
+                    MetricFormatter.CompactTokensLower(snap.ContextUsedTokens),
+                    MetricFormatter.CompactTokensLower(snap.ContextWindowTokens),
+                    snap.ContextPct ?? 0.0)
+                : (snap.ContextUsedTokens > 0 ? (MetricFormatter.CompactTokensLower(snap.ContextUsedTokens) + " / --") : "-- / --");
+            using (var rightFont = new Font("Segoe UI", 8.8f, FontStyle.Regular, GraphicsUnit.Point))
+            using (var rightBrush = new SolidBrush(pal.TextSecondary))
             {
-                g.DrawString("上下文窗口", labelFont, secBrush, innerX, cardRect.Y + 7);
-                string usageText = snap.ContextWindowTokens > 0
-                    ? string.Format("{0} / {1}  ({2:0.0}%)",
-                        MetricFormatter.CompactTokens(snap.ContextUsedTokens),
-                        MetricFormatter.CompactTokens(snap.ContextWindowTokens),
-                        snap.ContextPct ?? 0.0)
-                    : (snap.ContextUsedTokens > 0
-                        ? (MetricFormatter.CompactTokens(snap.ContextUsedTokens) + " / --")
-                        : "-- / --");
-                g.DrawString(usageText, monoBoldFont, titleBrush, innerX + 66, cardRect.Y + 7);
+                SizeF rSz = g.MeasureString(rightUsage, rightFont);
+                g.DrawString(rightUsage, rightFont, rightBrush, cardRect.Right - 12 - rSz.Width, cardRect.Y + 9);
             }
+
+            // Row 2: Gapped 10-channel rounded segmented bar (matches Antigravity usage-monitor screenshot!)
+            int barY = cardRect.Y + 32;
+            int barH = 7;
+            var trackRect = new Rectangle(innerX, barY, innerW, barH);
+            using (var trackPath = StripForm.CreateRoundedPath(trackRect, 3))
+            using (var trackBrush = new SolidBrush(pal.TrackBg))
+                g.FillPath(trackBrush, trackPath);
+
+            var channels = snap.ContextChannels ?? new List<ContextChannelItem>();
+            if (snap.ContextWindowTokens > 0 && snap.ContextUsedTokens > 0 && channels.Count > 0)
+            {
+                double win = (double)snap.ContextWindowTokens;
+                int gapPx = 2;
+                var nonZero = new List<ContextChannelItem>();
+                for (int i = 0; i < channels.Count; i++)
+                {
+                    if (channels[i].Tokens > 0) nonZero.Add(channels[i]);
+                }
+
+                if (nonZero.Count > 0)
+                {
+                    int totalBarPx = Math.Min(innerW, Math.Max(8, (int)Math.Round(innerW * Math.Min(1.0, snap.ContextUsedTokens / win))));
+                    int totalGapPx = Math.Max(0, nonZero.Count - 1) * gapPx;
+                    int availPx = Math.Max(nonZero.Count * 3, totalBarPx - totalGapPx);
+                    int curX = innerX;
+                    long usedSum = Math.Max(1, snap.ContextUsedTokens);
+
+                    for (int i = 0; i < nonZero.Count && curX < innerX + innerW; i++)
+                    {
+                        var ch = nonZero[i];
+                        int segW = (int)Math.Round(availPx * (ch.Tokens / (double)usedSum));
+                        if (segW < 4) segW = 4; // small non-zero channels stay cleanly visible as pill dots
+                        if (curX + segW > innerX + innerW) segW = (innerX + innerW) - curX;
+                        if (segW <= 0) break;
+
+                        var segRect = new Rectangle(curX, barY, segW, barH);
+                        using (var segPath = StripForm.CreateRoundedPath(segRect, 3))
+                        using (var segBrush = new SolidBrush(pal.ForContextChannel(ch.Key)))
+                            g.FillPath(segBrush, segPath);
+
+                        curX += segW + gapPx;
+                    }
+                }
+            }
+
+            // Row 3: 2-column x 5-row channel breakdown grid (colored rounded square + label + right-aligned bold count)
+            int gridY = cardRect.Y + 47;
+            int colGap = 18;
+            int colW = (innerW - colGap) / 2;
+            int itemRowH = 20;
+
+            using (var chLabelFont = new Font("Microsoft YaHei UI", 8.3f, FontStyle.Regular, GraphicsUnit.Point))
+            using (var chValFont = new Font("Segoe UI Semibold", 8.6f, FontStyle.Regular, GraphicsUnit.Point))
+            using (var lblBrush = new SolidBrush(pal.TextSecondary))
+            using (var valBrush = new SolidBrush(pal.TextPrimary))
+            using (var zeroBrush = new SolidBrush(pal.TextMuted))
+            using (var rightFmt = new StringFormat { Alignment = StringAlignment.Far })
+            {
+                int displayCount = Math.Min(10, channels.Count);
+                for (int i = 0; i < displayCount; i++)
+                {
+                    int row = i / 2;
+                    int col = i % 2;
+                    int cx = innerX + (col * (colW + colGap));
+                    int cy = gridY + (row * itemRowH);
+
+                    var ch = channels[i];
+                    var swRect = new Rectangle(cx, cy + 5, 7, 7);
+                    using (var swPath = StripForm.CreateRoundedPath(swRect, 2))
+                    using (var swBrush = new SolidBrush(pal.ForContextChannel(ch.Key)))
+                        g.FillPath(swBrush, swPath);
+
+                    g.DrawString(ch.Label, chLabelFont, lblBrush, cx + 13, cy + 2);
+                    string valText = ch.Tokens > 0 ? MetricFormatter.CompactTokensLower(ch.Tokens) : "0";
+                    g.DrawString(valText, chValFont, ch.Tokens > 0 ? valBrush : zeroBrush, cx + colW, cy + 1, rightFmt);
+                }
+            }
+
+            // Compact footer inside card: remaining space + 5h/weekly quota
+            int footY = cardRect.Bottom - 20;
+            using (var sep = new Pen(pal.Border, 1f))
+                g.DrawLine(sep, innerX, footY - 3, cardRect.Right - 12, footY - 3);
 
             if (snap.ContextWindowTokens > 0)
             {
                 double pct = snap.ContextPct ?? 0.0;
-                Color remColor = pct >= 85.0 ? pal.TierDanger : (pct >= 70.0 ? pal.TierWarn : pal.TierGood);
-                string remText = "剩余 " + MetricFormatter.CompactTokens(snap.ContextRemainingTokens);
-                SizeF remSz = g.MeasureString(remText, subFont);
-                using (var remBrush = new SolidBrush(remColor))
-                    g.DrawString(remText, subFont, remBrush, cardRect.Right - 10 - remSz.Width, cardRect.Y + 7);
-            }
-
-            // Row 2: Segmented Context Progress Bar (Cached + Uncached Input + Last Output)
-            int barY = cardRect.Y + 28;
-            int barH = 8;
-            var trackRect = new Rectangle(innerX, barY, innerW, barH);
-            using (var trackPath = StripForm.CreateRoundedPath(trackRect, 4))
-            using (var trackBrush = new SolidBrush(pal.TrackBg))
-                g.FillPath(trackBrush, trackPath);
-
-            if (snap.ContextWindowTokens > 0 && snap.ContextUsedTokens > 0)
-            {
-                double win = (double)snap.ContextWindowTokens;
-                int totalW = Math.Min(innerW, Math.Max(6, (int)Math.Round(innerW * Math.Min(1.0, snap.ContextUsedTokens / win))));
-                int cachedW = (int)Math.Round(totalW * (snap.ContextCachedTokens / (double)Math.Max(1, snap.ContextUsedTokens)));
-                int uncachedW = Math.Max(0, totalW - cachedW);
-                int outW = snap.ContextLastOutputTokens > 0
-                    ? Math.Min(innerW - totalW, Math.Max(2, (int)Math.Round(innerW * Math.Min(0.15, snap.ContextLastOutputTokens / win))))
-                    : 0;
-
-                double pct = snap.ContextPct ?? 0.0;
-                Color cachedCol = pct >= 85.0 ? pal.TierDanger : (pct >= 70.0 ? pal.TierWarn : pal.AccentBlue);
-                Color uncachedCol = pal.TierInfo;
-                Color outCol = pal.TierGood;
-
-                using (var clipPath = StripForm.CreateRoundedPath(trackRect, 4))
-                {
-                    var state = g.Save();
-                    g.SetClip(clipPath);
-                    int cx = innerX;
-                    if (cachedW > 0)
-                    {
-                        using (var b = new SolidBrush(cachedCol))
-                            g.FillRectangle(b, cx, barY, cachedW, barH);
-                        cx += cachedW;
-                    }
-                    if (uncachedW > 0)
-                    {
-                        using (var b = new SolidBrush(uncachedCol))
-                            g.FillRectangle(b, cx, barY, uncachedW, barH);
-                        cx += uncachedW;
-                    }
-                    if (outW > 0)
-                    {
-                        using (var b = new SolidBrush(outCol))
-                            g.FillRectangle(b, cx, barY, outW, barH);
-                    }
-                    g.Restore(state);
-                }
-            }
-
-            // Row 3: Channel Breakdown Legend on left + 5h/Weekly Quota on right
-            int legY = cardRect.Y + 44;
-            int lx = innerX;
-            if (snap.ContextUsedTokens > 0)
-            {
-                double pct = snap.ContextPct ?? 0.0;
-                Color cachedCol = pct >= 85.0 ? pal.TierDanger : (pct >= 70.0 ? pal.TierWarn : pal.AccentBlue);
-                lx = DrawLegendDot(g, lx, legY, cachedCol, "缓存 " + MetricFormatter.CompactTokens(snap.ContextCachedTokens), subFont, pal.TextMuted);
-                lx = DrawLegendDot(g, lx + 8, legY, pal.TierInfo, "新入 " + MetricFormatter.CompactTokens(snap.ContextUncachedInputTokens), subFont, pal.TextMuted);
-                DrawLegendDot(g, lx + 8, legY, pal.TierGood, "出 " + MetricFormatter.CompactTokens(snap.ContextLastOutputTokens), subFont, pal.TextMuted);
-            }
-            else
-            {
-                using (var mBrush = new SolidBrush(pal.TextMuted))
-                    g.DrawString("等待上下文数据", subFont, mBrush, lx, legY);
+                Color remCol = pct >= 85.0 ? pal.TierDanger : (pct >= 70.0 ? pal.TierWarn : pal.TextMuted);
+                using (var rb = new SolidBrush(remCol))
+                    g.DrawString("剩余可用 " + MetricFormatter.CompactTokensLower(snap.ContextRemainingTokens), subFont, rb, innerX, footY);
             }
 
             var quotaParts = new List<string>();
             if (snap.PrimaryUsedPct.HasValue)
             {
                 double rem = Math.Max(0, Math.Min(100, 100.0 - snap.PrimaryUsedPct.Value));
-                quotaParts.Add(string.Format("5h余{0:0}%", rem));
+                quotaParts.Add(string.Format("5h 余 {0:0}%", rem));
             }
             if (snap.SecondaryUsedPct.HasValue)
             {
                 double rem = Math.Max(0, Math.Min(100, 100.0 - snap.SecondaryUsedPct.Value));
-                quotaParts.Add(string.Format("周余{0:0}%", rem));
+                quotaParts.Add(string.Format("周余 {0:0}%", rem));
             }
             if (quotaParts.Count > 0)
             {
-                string qText = string.Join(" · ", quotaParts.ToArray());
+                string qText = string.Join("  ·  ", quotaParts.ToArray());
                 SizeF qSz = g.MeasureString(qText, subFont);
-                using (var qBrush = new SolidBrush(pal.TextSecondary))
-                    g.DrawString(qText, subFont, qBrush, cardRect.Right - 10 - qSz.Width, legY);
+                using (var qb = new SolidBrush(pal.TextSecondary))
+                    g.DrawString(qText, subFont, qb, cardRect.Right - 12 - qSz.Width, footY);
             }
         }
 
-        private static int DrawLegendDot(Graphics g, int x, int y, Color dotColor, string text, Font font, Color textColor)
+        private static void DrawLayersIcon(Graphics g, int x, int y, Color color)
         {
-            using (var dotBrush = new SolidBrush(dotColor))
-                g.FillEllipse(dotBrush, x, y + 4, 6, 6);
-            using (var txtBrush = new SolidBrush(textColor))
-                g.DrawString(text, font, txtBrush, x + 9, y);
-            SizeF sz = g.MeasureString(text, font);
-            return x + 9 + (int)Math.Ceiling(sz.Width);
+            using (var pen = new Pen(color, 1.3f))
+            {
+                pen.LineJoin = LineJoin.Round;
+                // Top diamond
+                g.DrawPolygon(pen, new PointF[]
+                {
+                    new PointF(x + 6f, y + 1f),
+                    new PointF(x + 12f, y + 4f),
+                    new PointF(x + 6f, y + 7f),
+                    new PointF(x + 0f, y + 4f)
+                });
+                // Middle chevron
+                g.DrawLines(pen, new PointF[]
+                {
+                    new PointF(x + 0f, y + 7.5f),
+                    new PointF(x + 6f, y + 10.5f),
+                    new PointF(x + 12f, y + 7.5f)
+                });
+                // Bottom chevron
+                g.DrawLines(pen, new PointF[]
+                {
+                    new PointF(x + 0f, y + 10.5f),
+                    new PointF(x + 6f, y + 13.5f),
+                    new PointF(x + 12f, y + 10.5f)
+                });
+            }
         }
 
         private static void DrawTurnTable(
@@ -593,7 +632,7 @@ namespace CodexInputUsage
                     g.DrawString(MetricFormatter.CompactTokens(t.OutputTokens), monoFont, textBrush, colOut + 46, ty, rightFmt);
                     g.DrawString(MetricFormatter.CompactTokens(t.TotalTokens), monoBoldFont, textBrush, colTot + 52, ty, rightFmt);
 
-                    string cacheStr = MetricFormatter.FormatCacheCompact(t.CacheHitPct);
+                    string cacheStr = MetricFormatter.FormatCacheTwoDecimals(t.CacheHitPct);
                     Color cacheCol = t.CacheHitPct.HasValue ? pal.ForTier(MetricFormatter.ClassifyCache(t.CacheHitPct)) : pal.TextMuted;
                     using (var cacheBrush = new SolidBrush(cacheCol))
                         g.DrawString(cacheStr, monoBoldFont, cacheBrush, colRight, ty, rightFmt);

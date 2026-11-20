@@ -26,6 +26,13 @@ namespace CodexInputUsage
         internal double? CacheHitPct;
     }
 
+    internal sealed class ContextChannelItem
+    {
+        internal string Key;
+        internal string Label;
+        internal long Tokens;
+    }
+
     internal sealed class SessionMetricsSnapshot
     {
         internal string ThreadId;
@@ -50,6 +57,7 @@ namespace CodexInputUsage
         internal long ContextWindowTokens;
         internal long ContextRemainingTokens;
         internal double? ContextPct;
+        internal List<ContextChannelItem> ContextChannels = new List<ContextChannelItem>();
 
         // Rate limits (5h primary, 7d secondary)
         internal double? PrimaryUsedPct;
@@ -79,6 +87,15 @@ namespace CodexInputUsage
             return value.ToString(CultureInfo.InvariantCulture);
         }
 
+        internal static string CompactTokensLower(long value)
+        {
+            long mag = Math.Abs(value);
+            if (mag >= 1000000000L) return (value / 1000000000.0).ToString("0.00", CultureInfo.InvariantCulture) + "B";
+            if (mag >= 1000000L) return (value / 1000000.0).ToString("0.0", CultureInfo.InvariantCulture) + "M";
+            if (mag >= 1000L) return (value / 1000.0).ToString("0.0", CultureInfo.InvariantCulture) + "k";
+            return value.ToString(CultureInfo.InvariantCulture);
+        }
+
         internal static string ExactTokens(long value)
         {
             return value.ToString("N0", CultureInfo.InvariantCulture);
@@ -102,6 +119,12 @@ namespace CodexInputUsage
         {
             if (!pct.HasValue || double.IsNaN(pct.Value) || double.IsInfinity(pct.Value)) return "--";
             return pct.Value.ToString("0.0", CultureInfo.InvariantCulture) + "%";
+        }
+
+        internal static string FormatCacheTwoDecimals(double? pct)
+        {
+            if (!pct.HasValue || double.IsNaN(pct.Value) || double.IsInfinity(pct.Value)) return "--";
+            return pct.Value.ToString("0.00", CultureInfo.InvariantCulture) + "%";
         }
 
         internal static string FormatSeconds(long? ms)
@@ -211,9 +234,36 @@ namespace CodexInputUsage
             internal Dictionary<string, Interval> ToolItems = new Dictionary<string, Interval>(StringComparer.Ordinal);
         }
 
-        private readonly JavaScriptSerializer _json = new JavaScriptSerializer { MaxJsonLength = 8 * 1024 * 1024 };
+        private readonly JavaScriptSerializer _json = new JavaScriptSerializer { MaxJsonLength = 16 * 1024 * 1024 };
         private readonly Dictionary<string, MutableTurn> _turnsById = new Dictionary<string, MutableTurn>(StringComparer.OrdinalIgnoreCase);
         private readonly List<MutableTurn> _turnsOrdered = new List<MutableTurn>();
+        private readonly Dictionary<string, double> _ctxWeights = new Dictionary<string, double>(StringComparer.Ordinal);
+
+        private static readonly string[] ChannelKeys = new string[]
+        {
+            "assistant", "toolResults", "systemPrompt", "systemTools", "userInput",
+            "skills", "userRules", "mcpTools", "subagentMsg", "checkpoint"
+        };
+
+        private static readonly Dictionary<string, string> ChannelLabels = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            { "assistant", "模型回复" },
+            { "toolResults", "工具结果" },
+            { "systemPrompt", "系统提示词" },
+            { "systemTools", "系统工具" },
+            { "userInput", "用户消息" },
+            { "skills", "Skill" },
+            { "userRules", "用户规则" },
+            { "mcpTools", "MCP 工具" },
+            { "subagentMsg", "子代理通知" },
+            { "checkpoint", "压缩摘要" }
+        };
+
+        private bool _hasWorldStateStatic;
+        private double _wsUserRulesWeight;
+        private double _wsSkillsWeight;
+        private double _wsSystemToolsWeight;
+        private double _baseInstructionsWeight;
 
         private string _threadId;
         private string _bindingSource = "等待";
@@ -261,6 +311,13 @@ namespace CodexInputUsage
             _activeTurnId = null;
             _turnsById.Clear();
             _turnsOrdered.Clear();
+            _ctxWeights.Clear();
+            for (int i = 0; i < ChannelKeys.Length; i++) _ctxWeights[ChannelKeys[i]] = 0.0;
+            _hasWorldStateStatic = false;
+            _wsUserRulesWeight = 0.0;
+            _wsSkillsWeight = 0.0;
+            _wsSystemToolsWeight = 0.0;
+            _baseInstructionsWeight = 0.0;
             _cumInput = 0;
             _cumCached = 0;
             _cumOutput = 0;
@@ -387,11 +444,22 @@ namespace CodexInputUsage
                 || line.IndexOf("\"token_count\"", StringComparison.Ordinal) >= 0
                 || line.IndexOf("\"task_started\"", StringComparison.Ordinal) >= 0
                 || line.IndexOf("\"task_complete\"", StringComparison.Ordinal) >= 0
-                || line.IndexOf("\"item_completed\"", StringComparison.Ordinal) >= 0;
+                || line.IndexOf("\"item_completed\"", StringComparison.Ordinal) >= 0
+                || line.IndexOf("\"response_item\"", StringComparison.Ordinal) >= 0
+                || line.IndexOf("\"world_state\"", StringComparison.Ordinal) >= 0
+                || line.IndexOf("\"compacted\"", StringComparison.Ordinal) >= 0
+                || line.IndexOf("\"session_meta\"", StringComparison.Ordinal) >= 0;
         }
 
         private bool ConsumeLine(string line)
         {
+            // Fast path for high-volume response_item lines (avoid JSON deserializing 100KB tool outputs!)
+            if (line.IndexOf("\"type\":\"response_item\"", StringComparison.Ordinal) >= 0
+                && line.IndexOf("\"additional_tools\"", StringComparison.Ordinal) < 0)
+            {
+                return ConsumeFastResponseItem(line);
+            }
+
             Dictionary<string, object> row;
             try { row = _json.DeserializeObject(line) as Dictionary<string, object>; }
             catch { return false; }
@@ -400,6 +468,33 @@ namespace CodexInputUsage
             string rowType = GetStr(row, "type");
             var payload = GetDict(row, "payload");
             if (payload == null) return false;
+
+            if (rowType == "session_meta")
+            {
+                var bi = GetDict(payload, "base_instructions");
+                string biText = GetStr(bi, "text");
+                if (!string.IsNullOrEmpty(biText))
+                    _baseInstructionsWeight = EstimateTokensFast(biText);
+                return false;
+            }
+
+            if (rowType == "world_state")
+            {
+                ConsumeWorldState(payload);
+                return true;
+            }
+
+            if (rowType == "compacted")
+            {
+                ConsumeCompacted(payload);
+                return true;
+            }
+
+            if (rowType == "response_item")
+            {
+                ConsumeParsedResponseItem(payload);
+                return true;
+            }
 
             if (rowType == "token_usage_record")
             {
@@ -596,7 +691,8 @@ namespace CodexInputUsage
                 PrimaryUsedPct = _primaryUsedPct,
                 PrimaryResetsAt = _primaryResetsAt,
                 SecondaryUsedPct = _secondaryUsedPct,
-                SecondaryResetsAt = _secondaryResetsAt
+                SecondaryResetsAt = _secondaryResetsAt,
+                ContextChannels = BuildContextChannels(_contextUsed)
             };
 
             for (int i = 0; i < _turnsOrdered.Count; i++)
@@ -707,6 +803,251 @@ namespace CodexInputUsage
                 Tps = tps,
                 CacheHitPct = inp > 0 ? (double?)(cached * 100.0 / inp) : null
             };
+        }
+
+        private void AddCtxWeight(string channel, double weight)
+        {
+            if (weight <= 0 || string.IsNullOrEmpty(channel)) return;
+            double cur;
+            _ctxWeights.TryGetValue(channel, out cur);
+            _ctxWeights[channel] = cur + weight;
+        }
+
+        private bool ConsumeFastResponseItem(string line)
+        {
+            int headLen = Math.Min(line.Length, 320);
+            string head = line.Substring(0, headLen);
+            // Subtract ~120 chars of JSON envelope overhead so empty/short records stay realistic
+            int payloadChars = Math.Max(0, line.Length - 120);
+            if (payloadChars <= 0) return false;
+            double est = EstimateTokensFast(line) - 24.0;
+            if (est < 1.0) est = 1.0;
+
+            if (head.IndexOf("\"custom_tool_call_output\"", StringComparison.Ordinal) >= 0
+                || head.IndexOf("\"function_call_output\"", StringComparison.Ordinal) >= 0
+                || head.IndexOf("\"web_search_call\"", StringComparison.Ordinal) >= 0)
+            {
+                AddCtxWeight("toolResults", est);
+                return false;
+            }
+            if (head.IndexOf("\"custom_tool_call\"", StringComparison.Ordinal) >= 0
+                || head.IndexOf("\"function_call\"", StringComparison.Ordinal) >= 0
+                || head.IndexOf("\"reasoning\"", StringComparison.Ordinal) >= 0)
+            {
+                AddCtxWeight("assistant", est);
+                return false;
+            }
+            if (head.IndexOf("\"compaction\"", StringComparison.Ordinal) >= 0)
+            {
+                AddCtxWeight("checkpoint", est);
+                return false;
+            }
+            if (head.IndexOf("\"role\":\"assistant\"", StringComparison.Ordinal) >= 0)
+            {
+                AddCtxWeight("assistant", est);
+                return false;
+            }
+            if (head.IndexOf("\"role\":\"user\"", StringComparison.Ordinal) >= 0)
+            {
+                if (line.IndexOf("<subagent_notification>", StringComparison.OrdinalIgnoreCase) >= 0)
+                    AddCtxWeight("subagentMsg", est);
+                else
+                    AddCtxWeight("userInput", est);
+                return false;
+            }
+            if (head.IndexOf("\"role\":\"developer\"", StringComparison.Ordinal) >= 0)
+            {
+                if (line.IndexOf("mcp__", StringComparison.OrdinalIgnoreCase) >= 0
+                    && line.IndexOf("<tools>", StringComparison.OrdinalIgnoreCase) >= 0)
+                    AddCtxWeight("mcpTools", est);
+                else
+                    AddCtxWeight("systemPrompt", est);
+                return false;
+            }
+            return false;
+        }
+
+        private void ConsumeParsedResponseItem(Dictionary<string, object> payload)
+        {
+            string pType = GetStr(payload, "type");
+            if (pType == "additional_tools")
+            {
+                object toolsObj;
+                if (payload.TryGetValue("tools", out toolsObj) && toolsObj is object[])
+                {
+                    var arr = (object[])toolsObj;
+                    for (int i = 0; i < arr.Length; i++)
+                    {
+                        var td = arr[i] as Dictionary<string, object>;
+                        string name = GetStr(td, "name") ?? string.Empty;
+                        string serialized = _json.Serialize(arr[i]);
+                        double w = EstimateTokensFast(serialized);
+                        if (name.StartsWith("mcp__", StringComparison.OrdinalIgnoreCase))
+                            AddCtxWeight("mcpTools", w);
+                        else
+                            AddCtxWeight("systemTools", w);
+                    }
+                }
+                return;
+            }
+
+            string role = GetStr(payload, "role");
+            string text = _json.Serialize(payload);
+            double est = EstimateTokensFast(text);
+            if (pType == "compaction") AddCtxWeight("checkpoint", est);
+            else if (pType == "custom_tool_call_output" || pType == "function_call_output" || pType == "web_search_call")
+                AddCtxWeight("toolResults", est);
+            else if (pType == "custom_tool_call" || pType == "function_call" || pType == "reasoning" || role == "assistant")
+                AddCtxWeight("assistant", est);
+            else if (role == "user")
+            {
+                if (text.IndexOf("<subagent_notification>", StringComparison.OrdinalIgnoreCase) >= 0)
+                    AddCtxWeight("subagentMsg", est);
+                else
+                    AddCtxWeight("userInput", est);
+            }
+            else if (role == "developer")
+            {
+                AddCtxWeight("systemPrompt", est);
+            }
+        }
+
+        private void ConsumeWorldState(Dictionary<string, object> payload)
+        {
+            var st = GetDict(payload, "state");
+            if (st == null) return;
+
+            object v;
+            if (st.TryGetValue("agents_md", out v) && v != null)
+                _wsUserRulesWeight = EstimateTokensFast(_json.Serialize(v));
+
+            double skillsW = 0.0;
+            if (st.TryGetValue("host_skills", out v) && v != null) skillsW += EstimateTokensFast(_json.Serialize(v));
+            if (st.TryGetValue("cloud_skills", out v) && v != null) skillsW += EstimateTokensFast(_json.Serialize(v));
+            if (st.TryGetValue("skills", out v) && v != null) skillsW += EstimateTokensFast(_json.Serialize(v));
+            if (skillsW > 0) _wsSkillsWeight = skillsW;
+
+            double toolsW = 0.0;
+            if (st.TryGetValue("tools", out v) && v != null) toolsW += EstimateTokensFast(_json.Serialize(v));
+            if (st.TryGetValue("top_level_tools", out v) && v != null) toolsW += EstimateTokensFast(_json.Serialize(v));
+            if (toolsW > 0) _wsSystemToolsWeight = toolsW;
+
+            _hasWorldStateStatic = true;
+        }
+
+        private void ConsumeCompacted(Dictionary<string, object> payload)
+        {
+            // Compaction replaces all prior active conversation history!
+            for (int i = 0; i < ChannelKeys.Length; i++) _ctxWeights[ChannelKeys[i]] = 0.0;
+
+            string msg = GetStr(payload, "message");
+            if (!string.IsNullOrWhiteSpace(msg))
+                AddCtxWeight("checkpoint", EstimateTokensFast(msg));
+
+            object rhObj;
+            if (payload.TryGetValue("replacement_history", out rhObj) && rhObj is object[])
+            {
+                var arr = (object[])rhObj;
+                for (int i = 0; i < arr.Length; i++)
+                {
+                    var item = arr[i] as Dictionary<string, object>;
+                    if (item != null) ConsumeParsedResponseItem(item);
+                }
+            }
+        }
+
+        private List<ContextChannelItem> BuildContextChannels(long officialContextUsed)
+        {
+            var weights = new Dictionary<string, double>(StringComparer.Ordinal);
+            for (int i = 0; i < ChannelKeys.Length; i++)
+            {
+                double w;
+                _ctxWeights.TryGetValue(ChannelKeys[i], out w);
+                weights[ChannelKeys[i]] = w;
+            }
+
+            // Merge static world_state channels (user rules & skills) and base instructions fallback
+            if (_hasWorldStateStatic)
+            {
+                if (_wsUserRulesWeight > 0) weights["userRules"] = Math.Max(weights["userRules"], _wsUserRulesWeight);
+                if (_wsSkillsWeight > 0) weights["skills"] = Math.Max(weights["skills"], _wsSkillsWeight);
+                if (_wsSystemToolsWeight > 0 && weights["systemTools"] <= 0) weights["systemTools"] = _wsSystemToolsWeight;
+            }
+            if (weights["systemPrompt"] <= 0 && _baseInstructionsWeight > 0)
+                weights["systemPrompt"] = _baseInstructionsWeight;
+
+            var scaled = ScaleBucketsExact(weights, ChannelKeys, officialContextUsed);
+            var list = new List<ContextChannelItem>(ChannelKeys.Length);
+            for (int i = 0; i < ChannelKeys.Length; i++)
+            {
+                string k = ChannelKeys[i];
+                list.Add(new ContextChannelItem
+                {
+                    Key = k,
+                    Label = ChannelLabels[k],
+                    Tokens = scaled[k]
+                });
+            }
+
+            // Sort descending by tokens (keeping canonical order on ties) just like usage-monitor!
+            return list.OrderByDescending(x => x.Tokens).ToList();
+        }
+
+        private static Dictionary<string, long> ScaleBucketsExact(Dictionary<string, double> weights, string[] keys, long targetTotal)
+        {
+            var outMap = new Dictionary<string, long>(StringComparer.Ordinal);
+            double sum = 0.0;
+            for (int i = 0; i < keys.Length; i++)
+            {
+                double w = weights.ContainsKey(keys[i]) ? Math.Max(0.0, weights[keys[i]]) : 0.0;
+                sum += w;
+                outMap[keys[i]] = 0;
+            }
+
+            if (targetTotal <= 0 || sum <= 0.0) return outMap;
+
+            var remainders = new List<Tuple<string, double, double>>();
+            long assigned = 0;
+            for (int i = 0; i < keys.Length; i++)
+            {
+                string k = keys[i];
+                double w = weights.ContainsKey(k) ? Math.Max(0.0, weights[k]) : 0.0;
+                if (w <= 0.0) continue;
+                double exact = (w * targetTotal) / sum;
+                long floored = (long)Math.Floor(exact);
+                outMap[k] = floored;
+                assigned += floored;
+                remainders.Add(Tuple.Create(k, exact - floored, w));
+            }
+
+            long diff = targetTotal - assigned;
+            if (diff > 0 && remainders.Count > 0)
+            {
+                remainders.Sort(delegate(Tuple<string, double, double> a, Tuple<string, double, double> b)
+                {
+                    int c = b.Item2.CompareTo(a.Item2);
+                    return c != 0 ? c : b.Item3.CompareTo(a.Item3);
+                });
+                for (long i = 0; i < diff; i++)
+                {
+                    string k = remainders[(int)(i % remainders.Count)].Item1;
+                    outMap[k] = outMap[k] + 1;
+                }
+            }
+            return outMap;
+        }
+
+        private static double EstimateTokensFast(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return 0.0;
+            int ascii = 0;
+            int nonAscii = 0;
+            for (int i = 0; i < text.Length; i++)
+            {
+                if (text[i] < 128) ascii++;
+                else nonAscii++;
+            }
+            return (ascii * 0.25) + (nonAscii * 0.65);
         }
 
         private static long ComputeDurationWithoutToolsMs(MutableTurn turn)

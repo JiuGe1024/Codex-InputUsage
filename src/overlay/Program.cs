@@ -224,9 +224,21 @@ namespace CodexInputUsage
                 snap.ContextCachedTokens, snap.ContextUncachedInputTokens, snap.ContextRemainingTokens,
                 snap.Turns.Count));
 
-            string[] variants = MetricFormatter.BuildStripVariants(snap);
+            var variants = StripRenderModel.BuildVariants(snap);
             for (int i = 0; i < variants.Length; i++)
-                sb.AppendLine("strip" + i + "=" + variants[i]);
+                sb.AppendLine("strip" + i + "=" + variants[i].Describe());
+
+            if (snap.ContextChannels != null && snap.ContextChannels.Count > 0)
+            {
+                long chSum = 0;
+                var chParts = new List<string>();
+                for (int i = 0; i < snap.ContextChannels.Count; i++)
+                {
+                    chSum += snap.ContextChannels[i].Tokens;
+                    chParts.Add(snap.ContextChannels[i].Label + "=" + snap.ContextChannels[i].Tokens);
+                }
+                sb.AppendLine("ctx_channels sum=" + chSum + " (official=" + snap.ContextUsedTokens + ") | " + string.Join(", ", chParts.ToArray()));
+            }
 
             string workDir = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, @"..\work"));
             Directory.CreateDirectory(workDir);
@@ -240,6 +252,8 @@ namespace CodexInputUsage
                 bmp.Save(Path.Combine(workDir, "preview-strip-compact-light.png"), ImageFormat.Png);
                 sb.AppendLine("strip1_px=" + bmp.Width + "x" + bmp.Height);
             }
+            using (var bmp = StripForm.RenderPreviewBitmap(variants[0], ThemePalette.Dark, false, true))
+                bmp.Save(Path.Combine(workDir, "preview-strip-dark.png"), ImageFormat.Png);
             using (var bmp = DetailPopoverForm.RenderPreviewBitmap(snap, ThemePalette.Light))
                 bmp.Save(Path.Combine(workDir, "preview-detail-light.png"), ImageFormat.Png);
             using (var bmp = DetailPopoverForm.RenderPreviewBitmap(snap, ThemePalette.Dark))
