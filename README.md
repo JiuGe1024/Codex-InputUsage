@@ -16,8 +16,11 @@ InputUsage 和原 TokenBar 各自使用独立源码、运行状态。两者共�
 
 已验证当前 Codex 窗口的实际挂载和真实会话数据。浏览器预览覆盖了 320 px 宽度、鼠标开关和键盘 Enter、Esc。全新环境冷启动尚待实机确认。
 
-## 无 CDP 浮层原型
+## 无 CDP 伴随浮层
 
-运行 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/Build-OverlayPrototype.ps1` 构建原型，生成 `outputs/Codex-InputUsage-Overlay.exe`。原型从正在运行的官方 Codex 读取 Windows 无障碍控件坐标，在前台窗口内寻找输入区下方的空位。窗口内部空间不足时，改贴到窗口下边缘，前提是屏幕工作区有空位。仍无空位、输入框识别不明确或切到其他应用时隐藏。左键展开，右键退出。
+运行 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/Build-OverlayPrototype.ps1` 构建，生成 `outputs/Codex-InputUsage-Overlay.exe`（源码位于 `src/overlay/`）。
 
-当前原型用于验证定位和交互，用量显示 `--`。本机已确认输入框与原生工具栏下方有可用空间，模拟空间不足时也通过了隐藏检查。无障碍树中的可见元素未提供会话 UUID，钩子自动启动和会话绑定尚未接入。
+- **工具栏无缝停靠**：通过 Windows UI Automation 识别官方 Microsoft Store 版 Codex 的输入框工具栏（Context 圆环左侧），使用 `UpdateLayeredWindow` 32 位透明文字绘制并跟随 `~/.codex/config.toml` 的明暗主题。常驻显示输出速度（扣除工具耗时）、最近一轮 Token、会话累计 Token 与缓存命中率，窗口变窄时自动降级简写以免遮挡按钮。
+- **严格会话绑定**：只读监听本机 `\\.\pipe\codex-ipc` 的 `thread-stream-following-changed` 广播，再按精确会话 ID 读取 `~/.codex/state_5.sqlite` 与增量 rollout JSONL。IPC 断线或多窗口同时跟随不同会话时不猜测，立即清空旧值显示 `--`。
+- **详情弹窗与逐轮明细**：左键点击状态条展开/收起详情卡片，显示输出速度、首字延迟、缓存命中率、最近一轮与会话累计、上下文进度条、5h/周配额余量及可滚轮翻页的逐轮明细。
+- **随原生 Codex 出现**：Codex 未运行时自动低功耗待机，原生图标启动 Codex 后自动唤醒停靠。可在右键或托盘菜单切换“开机自启”，或运行 `scripts/Install-AutoStart.ps1` / `scripts/Uninstall-AutoStart.ps1`。
