@@ -15,3 +15,9 @@ InputUsage 和原 TokenBar 各自使用独立源码、运行状态。两者共�
 统计沿用经过校验的本机会话记录，连接仅使用验证过的本机回环调试端口。输入区节点结构不匹配或当前会话身份不明确时，组件会隐藏。只支持已能识别会话 ID 的 Codex 对话页面。
 
 已验证当前 Codex 窗口的实际挂载和真实会话数据。浏览器预览覆盖了 320 px 宽度、鼠标开关和键盘 Enter、Esc。全新环境冷启动尚待实机确认。
+
+## 无 CDP 浮层原型
+
+运行 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/Build-OverlayPrototype.ps1` 构建原型，生成 `outputs/Codex-InputUsage-Overlay.exe`。原型从正在运行的官方 Codex 读取 Windows 无障碍控件坐标，在前台窗口内寻找输入区下方的空位。空位不足、输入框识别不明确或切到其他应用时隐藏。左键展开，右键退出。
+
+当前原型用于验证定位和交互，用量显示 `--`。本机已确认输入框与原生工具栏下方有可用空间，模拟空间不足时也通过了隐藏检查。无障碍树中的可见元素未提供会话 UUID，钩子自动启动和会话绑定尚未接入。
