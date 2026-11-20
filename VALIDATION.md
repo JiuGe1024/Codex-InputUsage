@@ -17,6 +17,8 @@
   - IPC 断线立即清空旧值显示 `--`（`IPC 断线`）。
 - 实机现场日志（`work/overlay-diag.log`）：9 个同时活跃流下通过 `IPC+正文`（`bodyScore=4, second=0`）正确锁定当前前台对话。
 
+- 实机进程认证回归验证：当官方 Store 版 Codex 以非 AppModel 方式启动（`GetApplicationUserModelId` 返回 `15703` / `APPMODEL_ERROR_NO_APPLICATION`）时，通过 `QueryFullProcessImageName` 核验 `Program Files\WindowsApps\OpenAI.Codex_*__2p2nqsd0c76g0\app\ChatGPT.exe` 成功识别（`codexRunning=True`）。
+
 ### 3. 数据口径核对（对比原版 TokenBar 与 SQLite）
 - 测试样本：`rollout-2026-11-08T14-31-26-01a1b9da-c9ed-7163-a8be-ef01576cc0aa.jsonl`（52 轮，含压缩历史）
   - 最近一轮：`811,833`（原版 TokenBar：`811.83k`），本轮缓存：`99.49%`（原版：`99.49%`）

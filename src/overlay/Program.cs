@@ -171,7 +171,7 @@ namespace CodexInputUsage
         {
             var sb = new StringBuilder();
             CodexThemeKind theme = CodexThemeSource.Detect();
-            sb.AppendLine("theme=" + theme);
+            sb.AppendLine("theme=" + theme + " codexRunning=" + NativeWin32.HasRunningCodexProcess());
 
             // 1. Unit-verify multi-followed IPC pool + UIA disambiguation (strict no-guess)
             var matcher = new SessionMatcher();

@@ -112,29 +112,65 @@ namespace CodexInputUsage
             IntPtr hdcSrc, ref NativePoint pptSrc, uint crKey, ref BlendFunction pblend, uint dwFlags);
         [DllImport("dwmapi.dll")] internal static extern int DwmGetWindowAttribute(IntPtr hwnd, int attr, out int value, int size);
         [DllImport("kernel32.dll")] internal static extern uint GetCurrentThreadId();
+        [DllImport("kernel32.dll", SetLastError = true)]
+        internal static extern IntPtr OpenProcess(uint desiredAccess, bool inheritHandle, int processId);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        internal static extern bool CloseHandle(IntPtr handle);
+        [DllImport("kernel32.dll", EntryPoint = "QueryFullProcessImageNameW", CharSet = CharSet.Unicode, SetLastError = true)]
+        internal static extern bool QueryFullProcessImageName(IntPtr process, uint flags, StringBuilder exeName, ref uint size);
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
         internal static extern int GetApplicationUserModelId(IntPtr process, ref uint length, StringBuilder id);
 
+        private const uint ProcessQueryLimitedInformation = 0x1000;
+        private const int ErrorInsufficientBuffer = 122;
+        private const int AppModelErrorNoApplication = 15703;
+
         internal static bool IsOfficialCodexProcess(Process process)
         {
+            if (process == null) return false;
             try
             {
                 if (!string.Equals(process.ProcessName, "ChatGPT", StringComparison.OrdinalIgnoreCase))
                     return false;
-                string path = process.MainModule.FileName;
+            }
+            catch { return false; }
+
+            IntPtr hProc = OpenProcess(ProcessQueryLimitedInformation, false, process.Id);
+            if (hProc == IntPtr.Zero) return false;
+            try
+            {
+                var pathBuf = new StringBuilder(1024);
+                uint pathLen = (uint)pathBuf.Capacity;
+                if (!QueryFullProcessImageName(hProc, 0, pathBuf, ref pathLen))
+                    return false;
+
+                string path = pathBuf.ToString();
                 string windowsApps = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "WindowsApps") + "\\";
                 if (!path.StartsWith(windowsApps + "OpenAI.Codex_", StringComparison.OrdinalIgnoreCase))
                     return false;
-                uint length = 0;
-                if (GetApplicationUserModelId(process.Handle, ref length, null) != 122 || length == 0 || length > 512)
+                if (path.IndexOf("__2p2nqsd0c76g0\\app\\ChatGPT.exe", StringComparison.OrdinalIgnoreCase) < 0)
                     return false;
-                var id = new StringBuilder((int)length);
-                return GetApplicationUserModelId(process.Handle, ref length, id) == 0
+
+                // When launched via Microsoft Store AppModel, verify exact AUMID;
+                // when launched directly via shortcut/launcher (APPMODEL_ERROR_NO_APPLICATION = 15703),
+                // the TrustedInstaller-protected WindowsApps\OpenAI.Codex_*__2p2nqsd0c76g0\app\ChatGPT.exe path already verifies authenticity.
+                uint aumidLen = 0;
+                int rc = GetApplicationUserModelId(hProc, ref aumidLen, null);
+                if (rc == AppModelErrorNoApplication)
+                    return true;
+                if (rc != ErrorInsufficientBuffer || aumidLen == 0 || aumidLen > 512)
+                    return false;
+                var id = new StringBuilder((int)aumidLen);
+                return GetApplicationUserModelId(hProc, ref aumidLen, id) == 0
                     && id.ToString().StartsWith("OpenAI.Codex_2p2nqsd0c76g0!", StringComparison.OrdinalIgnoreCase);
             }
             catch
             {
                 return false;
+            }
+            finally
+            {
+                CloseHandle(hProc);
             }
         }
 
