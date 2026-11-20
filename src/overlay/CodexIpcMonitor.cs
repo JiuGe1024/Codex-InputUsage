@@ -47,6 +47,8 @@ namespace CodexInputUsage
         private long _sequence;
         private long _version;
 
+        internal event EventHandler RouteUpdated;
+
         internal bool IsRunning
         {
             get
@@ -291,6 +293,7 @@ namespace CodexInputUsage
                 _lastError = null;
                 _version++;
             }
+            NotifyUpdated();
         }
 
         private void MarkDisconnected(string error)
@@ -304,6 +307,7 @@ namespace CodexInputUsage
                 _lastFollowedThreadId = null;
                 _version++;
             }
+            NotifyUpdated();
         }
 
         private void RebuildSnapshotLocked()
@@ -321,6 +325,16 @@ namespace CodexInputUsage
             _cachedThreadIds = unique.ToArray();
             _lastFollowedThreadId = unique.Count > 0 ? unique[0] : null;
             _version++;
+            NotifyUpdated();
+        }
+
+        private void NotifyUpdated()
+        {
+            var handler = RouteUpdated;
+            if (handler != null)
+            {
+                try { handler(this, EventArgs.Empty); } catch { }
+            }
         }
 
         private static string GetString(Dictionary<string, object> dict, string key)

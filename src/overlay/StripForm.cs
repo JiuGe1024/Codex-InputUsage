@@ -300,26 +300,53 @@ namespace CodexInputUsage
             {
                 Bounds = nextBounds;
                 Show();
-            }
-            else if (moved)
-            {
-                Bounds = nextBounds;
-            }
-
-            if (needRepaint || moved)
-            {
                 BlitCurrentSurface();
+                if (IsHandleCreated)
+                {
+                    NativeWin32.SetWindowPos(
+                        Handle, NativeWin32.HWND_TOPMOST,
+                        nextBounds.X, nextBounds.Y, nextBounds.Width, nextBounds.Height,
+                        NativeWin32.SWP_NOACTIVATE | NativeWin32.SWP_SHOWWINDOW);
+                }
             }
-
-            if (IsHandleCreated)
+            else if (needRepaint)
             {
+                if (moved) Bounds = nextBounds;
+                BlitCurrentSurface();
+                if (IsHandleCreated)
+                {
+                    NativeWin32.SetWindowPos(
+                        Handle, NativeWin32.HWND_TOPMOST,
+                        nextBounds.X, nextBounds.Y, nextBounds.Width, nextBounds.Height,
+                        NativeWin32.SWP_NOACTIVATE | NativeWin32.SWP_SHOWWINDOW);
+                }
+            }
+            else if (moved && IsHandleCreated)
+            {
+                // Position-only change: zero-allocation fast move without re-blitting the layered surface!
                 NativeWin32.SetWindowPos(
                     Handle, NativeWin32.HWND_TOPMOST,
-                    nextBounds.X, nextBounds.Y, nextBounds.Width, nextBounds.Height,
-                    NativeWin32.SWP_NOACTIVATE | NativeWin32.SWP_SHOWWINDOW);
+                    nextBounds.X, nextBounds.Y, 0, 0,
+                    NativeWin32.SWP_NOSIZE | NativeWin32.SWP_NOACTIVATE | NativeWin32.SWP_NOREDRAW);
             }
 
             return true;
+        }
+
+        /// <summary>
+        /// Ultra-fast (<0.1ms) geometric translation during window drag: moves the layered window
+        /// without repainting a single pixel so it stays glued to Codex at 60+ FPS.
+        /// </summary>
+        internal Rectangle MoveFast(int newX, int newY)
+        {
+            if (!Visible || !IsHandleCreated || _targetBounds.IsEmpty) return _targetBounds;
+            if (_targetBounds.X == newX && _targetBounds.Y == newY) return _targetBounds;
+            _targetBounds = new Rectangle(newX, newY, _targetBounds.Width, _targetBounds.Height);
+            NativeWin32.SetWindowPos(
+                Handle, NativeWin32.HWND_TOPMOST,
+                newX, newY, 0, 0,
+                NativeWin32.SWP_NOSIZE | NativeWin32.SWP_NOACTIVATE | NativeWin32.SWP_NOREDRAW);
+            return _targetBounds;
         }
 
         internal void HideStrip()

@@ -60,6 +60,7 @@ namespace CodexInputUsage
         internal const uint SWP_SHOWWINDOW = 0x0040;
         internal const uint SWP_NOMOVE = 0x0002;
         internal const uint SWP_NOSIZE = 0x0001;
+        internal const uint SWP_NOREDRAW = 0x0008;
         internal const byte AC_SRC_OVER = 0x00;
         internal const byte AC_SRC_ALPHA = 0x01;
         internal const uint ULW_ALPHA = 0x00000002;
@@ -246,8 +247,13 @@ namespace CodexInputUsage
 
         private readonly Func<IntPtr> _windowProvider;
         private readonly CancellationTokenSource _cts = new CancellationTokenSource();
+        private readonly AutoResetEvent _wakeSignal = new AutoResetEvent(false);
         private Thread _thread;
         private volatile ComposerDockSnapshot _latest = ComposerDockSnapshot.Empty;
+        private int _forceFullWalkFlag;
+        private int _forceFingerprintFlag;
+
+        internal event EventHandler SnapshotUpdated;
 
         internal ComposerDockTracker(Func<IntPtr> windowProvider)
         {
@@ -255,6 +261,13 @@ namespace CodexInputUsage
         }
 
         internal ComposerDockSnapshot Latest { get { return _latest; } }
+
+        internal void WakeNow(bool forceFullWalk, bool forceFingerprint)
+        {
+            if (forceFullWalk) Interlocked.Exchange(ref _forceFullWalkFlag, 1);
+            if (forceFingerprint) Interlocked.Exchange(ref _forceFingerprintFlag, 1);
+            try { _wakeSignal.Set(); } catch { }
+        }
 
         internal void Start()
         {
@@ -271,7 +284,9 @@ namespace CodexInputUsage
         public void Dispose()
         {
             try { _cts.Cancel(); } catch { }
+            try { _wakeSignal.Set(); } catch { }
             try { _cts.Dispose(); } catch { }
+            try { _wakeSignal.Dispose(); } catch { }
         }
 
         internal static ComposerDockSnapshot MeasureOnce(IntPtr hwnd)
@@ -300,16 +315,16 @@ namespace CodexInputUsage
                     IntPtr hwnd = _windowProvider();
                     if (hwnd == IntPtr.Zero)
                     {
-                        composer = null;
-                        contextEl = null;
-                        modelEl = null;
-                        trackedHwnd = IntPtr.Zero;
-                        _latest = ComposerDockSnapshot.Empty;
-                        Thread.Sleep(200);
+                        // Keep cached _latest so Alt-Tab back to the same Codex window renders on frame 1!
+                        _wakeSignal.WaitOne(220);
                         continue;
                     }
 
-                    bool needFullWalk = hwnd != trackedHwnd
+                    bool requestedFullWalk = Interlocked.Exchange(ref _forceFullWalkFlag, 0) != 0;
+                    bool requestedFp = Interlocked.Exchange(ref _forceFingerprintFlag, 0) != 0;
+
+                    bool needFullWalk = requestedFullWalk
+                        || hwnd != trackedHwnd
                         || composer == null
                         || (contextEl == null && modelEl == null)
                         || (DateTime.UtcNow - lastFullWalkUtc).TotalSeconds >= 12.0;
@@ -335,11 +350,8 @@ namespace CodexInputUsage
                                     {
                                         needFullWalk = true;
                                     }
-                                    else if ((DateTime.UtcNow - lastFingerprintUtc).TotalMilliseconds >= 650.0)
+                                    else if (requestedFp || (DateTime.UtcNow - lastFingerprintUtc).TotalMilliseconds >= 300.0)
                                     {
-                                        // Periodically refresh on-screen chat header/body fingerprints
-                                        // so switching back to an already-warm IPC chat is detected immediately
-                                        // even when the composer geometry does not move.
                                         string[] hdrs, bodies;
                                         CollectChatFingerprints(hwnd, winRect, curSnap.ComposerRect, out hdrs, out bodies);
                                         lastFingerprintUtc = DateTime.UtcNow;
@@ -356,6 +368,7 @@ namespace CodexInputUsage
                                             BodyTexts = bodies,
                                             Detail = curSnap.Detail
                                         };
+                                        if (SnapshotUpdated != null) SnapshotUpdated(this, EventArgs.Empty);
                                     }
                                 }
                             }
@@ -395,6 +408,7 @@ namespace CodexInputUsage
                             lastRefRect = snap.ReferenceRect;
                             if (snap.Source == DockSourceKind.UiaContext || snap.Source == DockSourceKind.UiaModel)
                                 lastFullWalkUtc = DateTime.UtcNow;
+                            if (SnapshotUpdated != null) SnapshotUpdated(this, EventArgs.Empty);
                         }
                     }
                 }
@@ -405,7 +419,7 @@ namespace CodexInputUsage
                     modelEl = null;
                 }
 
-                try { Thread.Sleep(180); }
+                try { _wakeSignal.WaitOne(140); }
                 catch { break; }
             }
         }
@@ -591,8 +605,7 @@ namespace CodexInputUsage
 
                 var cond = new OrCondition(
                     new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Text),
-                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Header),
-                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button));
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Header));
 
                 // Chat header sits in the top title bar (y <= winTop + 72), strictly above the sidebar thread list;
                 // allow left-aligned titles on wide/maximized windows while skipping top-left window chrome.

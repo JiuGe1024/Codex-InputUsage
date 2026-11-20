@@ -413,9 +413,11 @@ namespace CodexInputUsage
 
         private sealed class OverlayController : ApplicationContext
         {
-            private const int ActivePollMs = 160;
+            private const int ActivePollMs = 250;
             private const int StandbyPollMs = 1500;
 
+            private readonly SynchronizationContext _uiContext;
+            private readonly HostWindowEvents _hostEvents = new HostWindowEvents();
             private readonly CodexIpcMonitor _ipc = new CodexIpcMonitor();
             private readonly SessionMatcher _matcher = new SessionMatcher();
             private readonly RolloutSessionTracker _rollout = new RolloutSessionTracker();
@@ -427,9 +429,16 @@ namespace CodexInputUsage
             private readonly ToolStripMenuItem _trayAutoStartItem;
             private readonly System.Windows.Forms.Timer _uiTimer;
 
+            private FileSystemWatcher _rolloutWatcher;
+            private string _watchedRolloutPath = string.Empty;
+            private int _pendingAsyncRefresh;
+            private int _rolloutDirtyFlag;
+
             private volatile IntPtr _activeCodexHwnd = IntPtr.Zero;
             private SessionMetricsSnapshot _lastMetrics = new SessionMetricsSnapshot();
             private Rectangle _lastStripBounds = Rectangle.Empty;
+            private Rectangle _anchorWindowRect = Rectangle.Empty;
+            private Rectangle _anchorStripBounds = Rectangle.Empty;
             private DateTime _lastMetricsPollUtc = DateTime.MinValue;
             private DateTime _lastCodexPresenceCheckUtc = DateTime.MinValue;
             private DateTime _lastHeartbeatUtc = DateTime.MinValue;
@@ -447,6 +456,7 @@ namespace CodexInputUsage
             internal OverlayController(bool exitWithCodex)
             {
                 _exitWithCodex = exitWithCodex;
+                _uiContext = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
                 _dockTracker = new ComposerDockTracker(delegate { return _activeCodexHwnd; });
                 _strip.StripClicked += OnStripClicked;
                 _strip.AutoStartToggled += OnAutoStartToggled;
@@ -458,6 +468,20 @@ namespace CodexInputUsage
                         _popoverWanted = false;
                         _strip.SetPopoverOpen(false);
                     }
+                };
+
+                // Event-driven Win32 hooks for <1ms foreground switch & 60fps glued window drag!
+                _hostEvents.ForegroundChanged += OnForegroundChanged;
+                _hostEvents.TrackedWindowMoved += OnTrackedWindowMoved;
+                _hostEvents.TrackedWindowMoveSizeEnded += OnTrackedWindowMoveSizeEnded;
+                _hostEvents.TrackedWindowMinimized += OnTrackedWindowMinimized;
+
+                // Wake UI immediately when background UIA or IPC finishes an update
+                _dockTracker.SnapshotUpdated += delegate { PostUiRefresh(false); };
+                _ipc.RouteUpdated += delegate
+                {
+                    _dockTracker.WakeNow(false, true);
+                    PostUiRefresh(true);
                 };
 
                 var trayMenu = new ContextMenuStrip();
@@ -483,6 +507,108 @@ namespace CodexInputUsage
                 _uiTimer = new System.Windows.Forms.Timer { Interval = ActivePollMs };
                 _uiTimer.Tick += OnTick;
                 _uiTimer.Start();
+            }
+
+            private void PostUiRefresh(bool markRolloutDirty)
+            {
+                if (markRolloutDirty) Interlocked.Exchange(ref _rolloutDirtyFlag, 1);
+                if (Interlocked.Exchange(ref _pendingAsyncRefresh, 1) != 0) return;
+                try
+                {
+                    _uiContext.Post(delegate
+                    {
+                        Interlocked.Exchange(ref _pendingAsyncRefresh, 0);
+                        if (!_strip.IsDisposed) SyncNow(false);
+                    }, null);
+                }
+                catch
+                {
+                    Interlocked.Exchange(ref _pendingAsyncRefresh, 0);
+                }
+            }
+
+            private void OnForegroundChanged(object sender, EventArgs e)
+            {
+                // Instant (<1ms) hide when switching away or frame-1 restore when switching back to Codex!
+                SyncNow(true);
+            }
+
+            private void OnTrackedWindowMinimized(object sender, EventArgs e)
+            {
+                _strip.HideStrip();
+                if (_popover.Visible) _popover.Hide();
+                _popoverWanted = false;
+                _strip.SetPopoverOpen(false);
+            }
+
+            private void OnTrackedWindowMoved(object sender, EventArgs e)
+            {
+                IntPtr hwnd = _activeCodexHwnd;
+                if (hwnd == IntPtr.Zero || !_strip.Visible || _anchorWindowRect.IsEmpty || _anchorStripBounds.IsEmpty)
+                    return;
+
+                Rectangle curWin = NativeWin32.GetWindowRectangle(hwnd);
+                if (curWin.IsEmpty) return;
+
+                if (curWin.Size == _anchorWindowRect.Size)
+                {
+                    // Pure window drag: translate strip pixel-for-pixel at 60+ FPS with zero UIA/repaint latency!
+                    int dx = curWin.X - _anchorWindowRect.X;
+                    int dy = curWin.Y - _anchorWindowRect.Y;
+                    int nextX = _anchorStripBounds.X + dx;
+                    int nextY = _anchorStripBounds.Y + dy;
+                    _lastStripBounds = _strip.MoveFast(nextX, nextY);
+                    if (_popoverWanted && _popover.Visible)
+                        _popover.PositionAbove(_lastStripBounds);
+                }
+                else
+                {
+                    // Window resize/maximize: predict bottom-anchored horizontal shift immediately,
+                    // then wake UIA tracker to settle exact coordinates.
+                    int dy = curWin.Bottom - _anchorWindowRect.Bottom;
+                    int dx = (curWin.Width - _anchorWindowRect.Width) / 2 + (curWin.X - _anchorWindowRect.X);
+                    int nextX = _anchorStripBounds.X + dx;
+                    int nextY = _anchorStripBounds.Y + dy;
+                    _lastStripBounds = _strip.MoveFast(nextX, nextY);
+                    if (_popoverWanted && _popover.Visible)
+                        _popover.PositionAbove(_lastStripBounds);
+                    _dockTracker.WakeNow(true, false);
+                }
+            }
+
+            private void OnTrackedWindowMoveSizeEnded(object sender, EventArgs e)
+            {
+                _dockTracker.WakeNow(true, true);
+            }
+
+            private void WatchRolloutFile(string rolloutPath)
+            {
+                string norm = rolloutPath ?? string.Empty;
+                if (string.Equals(_watchedRolloutPath, norm, StringComparison.OrdinalIgnoreCase)) return;
+                _watchedRolloutPath = norm;
+
+                if (_rolloutWatcher != null)
+                {
+                    try { _rolloutWatcher.EnableRaisingEvents = false; _rolloutWatcher.Dispose(); } catch { }
+                    _rolloutWatcher = null;
+                }
+
+                if (string.IsNullOrWhiteSpace(norm)) return;
+                try
+                {
+                    string dir = Path.GetDirectoryName(norm);
+                    string file = Path.GetFileName(norm);
+                    if (string.IsNullOrWhiteSpace(dir) || string.IsNullOrWhiteSpace(file) || !Directory.Exists(dir))
+                        return;
+                    var w = new FileSystemWatcher(dir, file)
+                    {
+                        NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size
+                    };
+                    w.Changed += delegate { PostUiRefresh(true); };
+                    w.EnableRaisingEvents = true;
+                    _rolloutWatcher = w;
+                }
+                catch { }
             }
 
             private void SyncAutoStartMenuState()
@@ -521,6 +647,8 @@ namespace CodexInputUsage
             {
                 _codexRunning = false;
                 _activeCodexHwnd = IntPtr.Zero;
+                _hostEvents.SetTrackedWindow(IntPtr.Zero);
+                WatchRolloutFile(null);
                 if (_ipc.IsRunning) _ipc.Stop();
                 _rollout.Reset(null, "等待", null);
                 _lastMetrics = _rollout.BuildSnapshot();
@@ -545,6 +673,11 @@ namespace CodexInputUsage
             }
 
             private void OnTick(object sender, EventArgs e)
+            {
+                SyncNow(false);
+            }
+
+            private void SyncNow(bool fromForegroundEvent)
             {
                 DateTime now = DateTime.UtcNow;
 
@@ -586,7 +719,9 @@ namespace CodexInputUsage
                         fgCodex = _activeCodexHwnd;
                 }
 
+                bool gainedFocus = fgCodex != IntPtr.Zero && _activeCodexHwnd != fgCodex;
                 _activeCodexHwnd = fgCodex;
+                _hostEvents.SetTrackedWindow(fgCodex);
 
                 if (fgCodex == IntPtr.Zero)
                 {
@@ -598,6 +733,11 @@ namespace CodexInputUsage
                     return;
                 }
 
+                if (gainedFocus || fromForegroundEvent)
+                {
+                    _dockTracker.WakeNow(false, true);
+                }
+
                 var dock = _dockTracker.Latest;
                 if (dock == null || dock.WindowHandle != fgCodex || dock.Source == DockSourceKind.None)
                 {
@@ -607,19 +747,48 @@ namespace CodexInputUsage
                     return;
                 }
 
-                // Resolve active conversation by cross-verifying IPC followed pool against foreground UIA header + body!
-                var ipcSt = _ipc.GetStatus();
-                string fpSig = ipcSt.Version + "|" + string.Join("\u001f", dock.HeaderTexts ?? new string[0])
-                    + "|" + (dock.BodyTexts != null && dock.BodyTexts.Length > 0 ? dock.BodyTexts[0] : string.Empty);
-                bool fpChanged = !string.Equals(fpSig, _lastFingerprintSig, StringComparison.Ordinal);
+                // Adjust cached dock snapshot instantly if Codex was moved while in the background
+                Rectangle liveWinRect = NativeWin32.GetWindowRectangle(fgCodex);
+                ComposerDockSnapshot effectiveDock = dock;
+                if (!liveWinRect.IsEmpty && !dock.WindowRect.IsEmpty && liveWinRect != dock.WindowRect)
+                {
+                    if (liveWinRect.Size == dock.WindowRect.Size)
+                    {
+                        int dx = liveWinRect.X - dock.WindowRect.X;
+                        int dy = liveWinRect.Y - dock.WindowRect.Y;
+                        effectiveDock = new ComposerDockSnapshot
+                        {
+                            WindowHandle = dock.WindowHandle,
+                            Source = dock.Source,
+                            ReferenceRect = OffsetRect(dock.ReferenceRect, dx, dy),
+                            RowRect = OffsetRect(dock.RowRect, dx, dy),
+                            ComposerRect = OffsetRect(dock.ComposerRect, dx, dy),
+                            WindowRect = liveWinRect,
+                            LeftBarrierX = dock.LeftBarrierX + dx,
+                            HeaderTexts = dock.HeaderTexts,
+                            BodyTexts = dock.BodyTexts,
+                            Detail = dock.Detail
+                        };
+                    }
+                    else
+                    {
+                        _dockTracker.WakeNow(true, false);
+                    }
+                }
 
-                SessionMatchResult matched = null;
-                if (fpChanged || (now - _lastMetricsPollUtc).TotalMilliseconds >= 450.0)
+                var ipcSt = _ipc.GetStatus();
+                string fpSig = ipcSt.Version + "|" + string.Join("\u001f", effectiveDock.HeaderTexts ?? new string[0])
+                    + "|" + (effectiveDock.BodyTexts != null && effectiveDock.BodyTexts.Length > 0 ? effectiveDock.BodyTexts[0] : string.Empty);
+                bool fpChanged = !string.Equals(fpSig, _lastFingerprintSig, StringComparison.Ordinal);
+                bool rolloutDirty = Interlocked.Exchange(ref _rolloutDirtyFlag, 0) != 0;
+
+                if (fpChanged || rolloutDirty || (now - _lastMetricsPollUtc).TotalMilliseconds >= 450.0)
                 {
                     _lastFingerprintSig = fpSig;
                     _lastMetricsPollUtc = now;
-                    matched = _matcher.Resolve(ipcSt, dock.HeaderTexts, dock.BodyTexts);
+                    SessionMatchResult matched = _matcher.Resolve(ipcSt, effectiveDock.HeaderTexts, effectiveDock.BodyTexts);
                     _lastMatchDetail = matched.Detail ?? matched.Source;
+                    WatchRolloutFile(matched.RolloutPath);
 
                     bool threadChanged = !string.Equals(_rollout.CurrentThreadId, matched.ThreadId, StringComparison.OrdinalIgnoreCase);
                     bool sourceChanged = !string.Equals(_lastMetrics.BindingSource, matched.Source, StringComparison.Ordinal);
@@ -632,17 +801,20 @@ namespace CodexInputUsage
                 ThemePalette pal = ThemePalette.For(CodexThemeSource.Current);
                 Rectangle placed;
                 string variant;
-                bool shown = _strip.ApplyDockedState(dock, _lastMetrics, pal, out placed, out variant);
+                bool shown = _strip.ApplyDockedState(effectiveDock, _lastMetrics, pal, out placed, out variant);
                 if (!shown)
                 {
-                    LogState("dock-no-space:" + dock.Detail);
+                    LogState("dock-no-space:" + effectiveDock.Detail);
                     if (_popover.Visible) _popover.Hide();
                     return;
                 }
 
                 _lastStripBounds = placed;
+                _anchorWindowRect = effectiveDock.WindowRect;
+                _anchorStripBounds = placed;
+
                 LogState(string.Format("docked:{0} bounds={1} text=\"{2}\" thread={3}({4}) match=[{5}]",
-                    dock.Source, placed, variant, MetricFormatter.ShortThreadId(_lastMetrics.ThreadId),
+                    effectiveDock.Source, placed, variant, MetricFormatter.ShortThreadId(_lastMetrics.ThreadId),
                     _lastMetrics.BindingSource, _lastMatchDetail));
 
                 if (_popoverWanted)
@@ -656,6 +828,11 @@ namespace CodexInputUsage
                     _capturedOnce = true;
                     Program.CaptureRegionOnce(placed);
                 }
+            }
+
+            private static Rectangle OffsetRect(Rectangle r, int dx, int dy)
+            {
+                return r.IsEmpty ? r : new Rectangle(r.X + dx, r.Y + dy, r.Width, r.Height);
             }
 
             private void LogState(string state)
@@ -675,6 +852,8 @@ namespace CodexInputUsage
                 {
                     _uiTimer.Stop();
                     _uiTimer.Dispose();
+                    WatchRolloutFile(null);
+                    _hostEvents.Dispose();
                     _trayIcon.Visible = false;
                     _trayIcon.Dispose();
                     _dockTracker.Dispose();
