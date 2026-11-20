@@ -279,10 +279,26 @@ namespace CodexInputUsage
             string src = string.IsNullOrWhiteSpace(snap.BindingSource) ? "等待" : snap.BindingSource;
             Color badgeColor;
             string badgeText;
-            if (src == "IPC") { badgeColor = pal.TierGood; badgeText = "IPC 绑定"; }
-            else if (src == "多窗口歧义") { badgeColor = pal.TierWarn; badgeText = "多窗口待确认"; }
-            else if (src == "IPC 断线") { badgeColor = pal.TierDanger; badgeText = "IPC 断线"; }
-            else { badgeColor = pal.TextMuted; badgeText = "等待会话"; }
+            if (src.StartsWith("IPC+", StringComparison.Ordinal) || src == "IPC")
+            {
+                badgeColor = pal.TierGood;
+                badgeText = src == "IPC" ? "IPC 绑定" : src;
+            }
+            else if (src == "待确认" || src == "多窗口歧义")
+            {
+                badgeColor = pal.TierWarn;
+                badgeText = "会话待确认";
+            }
+            else if (src == "IPC 断线")
+            {
+                badgeColor = pal.TierDanger;
+                badgeText = "IPC 断线";
+            }
+            else
+            {
+                badgeColor = pal.TextMuted;
+                badgeText = "等待会话";
+            }
             SizeF bSz = g.MeasureString(badgeText, badgeFont);
             var badgeRect = new Rectangle(Pad + 114, y + 9, (int)Math.Ceiling(bSz.Width) + 12, 18);
             using (var path = StripForm.CreateRoundedPath(badgeRect, 4))

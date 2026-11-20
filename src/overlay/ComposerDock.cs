@@ -28,11 +28,15 @@ namespace CodexInputUsage
         internal Rectangle ComposerRect;
         internal Rectangle WindowRect;
         internal int LeftBarrierX;
+        internal string[] HeaderTexts = new string[0];
+        internal string[] BodyTexts = new string[0];
         internal string Detail;
 
         internal static readonly ComposerDockSnapshot Empty = new ComposerDockSnapshot
         {
             Source = DockSourceKind.None,
+            HeaderTexts = new string[0],
+            BodyTexts = new string[0],
             Detail = "empty"
         };
 
@@ -286,6 +290,7 @@ namespace CodexInputUsage
             IntPtr trackedHwnd = IntPtr.Zero;
             Rectangle lastRefRect = Rectangle.Empty;
             DateTime lastFullWalkUtc = DateTime.MinValue;
+            DateTime lastFingerprintUtc = DateTime.MinValue;
             CancellationToken token = _cts.Token;
 
             while (!token.IsCancellationRequested)
@@ -318,17 +323,40 @@ namespace CodexInputUsage
                         {
                             if (curRect != lastRefRect)
                             {
-                                // Layout shifted -> do a full walk to refresh left cluster & row rect
                                 needFullWalk = true;
                             }
                             else
                             {
-                                // Still identical! Just refresh window rect cheaply
                                 var curSnap = _latest;
                                 if (curSnap != null && curSnap.WindowHandle == hwnd)
                                 {
                                     Rectangle winRect = NativeWin32.GetWindowRectangle(hwnd);
-                                    if (winRect != curSnap.WindowRect) needFullWalk = true;
+                                    if (winRect != curSnap.WindowRect)
+                                    {
+                                        needFullWalk = true;
+                                    }
+                                    else if ((DateTime.UtcNow - lastFingerprintUtc).TotalMilliseconds >= 650.0)
+                                    {
+                                        // Periodically refresh on-screen chat header/body fingerprints
+                                        // so switching back to an already-warm IPC chat is detected immediately
+                                        // even when the composer geometry does not move.
+                                        string[] hdrs, bodies;
+                                        CollectChatFingerprints(hwnd, winRect, curSnap.ComposerRect, out hdrs, out bodies);
+                                        lastFingerprintUtc = DateTime.UtcNow;
+                                        _latest = new ComposerDockSnapshot
+                                        {
+                                            WindowHandle = curSnap.WindowHandle,
+                                            Source = curSnap.Source,
+                                            ReferenceRect = curSnap.ReferenceRect,
+                                            RowRect = curSnap.RowRect,
+                                            ComposerRect = curSnap.ComposerRect,
+                                            WindowRect = curSnap.WindowRect,
+                                            LeftBarrierX = curSnap.LeftBarrierX,
+                                            HeaderTexts = hdrs,
+                                            BodyTexts = bodies,
+                                            Detail = curSnap.Detail
+                                        };
+                                    }
                                 }
                             }
                         }
@@ -355,6 +383,14 @@ namespace CodexInputUsage
 
                         if (!degraded)
                         {
+                            if (!snap.ComposerRect.IsEmpty && !snap.WindowRect.IsEmpty)
+                            {
+                                string[] hdrs, bodies;
+                                CollectChatFingerprints(hwnd, snap.WindowRect, snap.ComposerRect, out hdrs, out bodies);
+                                snap.HeaderTexts = hdrs;
+                                snap.BodyTexts = bodies;
+                                lastFingerprintUtc = DateTime.UtcNow;
+                            }
                             _latest = snap;
                             lastRefRect = snap.ReferenceRect;
                             if (snap.Source == DockSourceKind.UiaContext || snap.Source == DockSourceKind.UiaModel)
@@ -529,6 +565,105 @@ namespace CodexInputUsage
                 Detail = string.Format("src={0} ref={1} row={2} comp={3} leftBarrier={4} children={5}",
                     source, refRect, rowRect, composerRect, leftBarrier, children.Count)
             };
+        }
+
+        private static void CollectChatFingerprints(
+            IntPtr hwnd,
+            Rectangle winRect,
+            Rectangle composerRect,
+            out string[] headerTexts,
+            out string[] bodyTexts)
+        {
+            headerTexts = new string[0];
+            bodyTexts = new string[0];
+            if (hwnd == IntPtr.Zero || winRect.IsEmpty || composerRect.IsEmpty) return;
+
+            try
+            {
+                AutomationElement root = AutomationElement.FromHandle(hwnd);
+                if (root == null) return;
+
+                var cache = new CacheRequest();
+                cache.Add(AutomationElement.NameProperty);
+                cache.Add(AutomationElement.BoundingRectangleProperty);
+                cache.Add(AutomationElement.IsOffscreenProperty);
+                cache.TreeScope = TreeScope.Element;
+
+                var cond = new OrCondition(
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Text),
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Header),
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button));
+
+                // Chat header sits in the top title bar (y <= winTop + 72), strictly above the sidebar thread list;
+                // allow left-aligned titles on wide/maximized windows while skipping top-left window chrome.
+                int headerMinX = Math.Max(winRect.Left + 160, Math.Min(composerRect.Left - 180, winRect.Left + 260));
+                int headerMaxY = winRect.Top + 72;
+                int bodyMinX = composerRect.Left - 80;
+                int bodyMaxX = composerRect.Right + 80;
+                int bodyMinY = winRect.Top + 70;
+                int bodyMaxY = composerRect.Top - 6;
+
+                var headers = new List<Tuple<int, string>>();
+                var bodies = new List<Tuple<int, string>>();
+
+                using (cache.Activate())
+                {
+                    var found = root.FindAll(TreeScope.Descendants, cond);
+                    for (int i = 0; i < found.Count; i++)
+                    {
+                        try
+                        {
+                            var info = found[i].Cached;
+                            if (info.IsOffscreen) continue;
+                            string name = info.Name;
+                            if (string.IsNullOrWhiteSpace(name)) continue;
+                            var b = info.BoundingRectangle;
+                            if (b.IsEmpty || double.IsNaN(b.X) || double.IsInfinity(b.X) || b.Width <= 0 || b.Height <= 0)
+                                continue;
+
+                            int left = (int)Math.Round(b.X);
+                            int top = (int)Math.Round(b.Y);
+                            int right = left + (int)Math.Round(b.Width);
+                            int bottom = top + (int)Math.Round(b.Height);
+
+                            if (top >= winRect.Top && bottom <= headerMaxY && left >= headerMinX)
+                            {
+                                string trimmed = name.Trim();
+                                if (trimmed.Length >= 3)
+                                    headers.Add(Tuple.Create(left, trimmed));
+                            }
+                            else if (top >= bodyMinY && bottom <= bodyMaxY && left >= bodyMinX && right <= bodyMaxX)
+                            {
+                                string trimmed = name.Trim();
+                                if (trimmed.Length >= 12)
+                                    bodies.Add(Tuple.Create(bottom, trimmed));
+                            }
+                        }
+                        catch { }
+                    }
+                }
+
+                headers.Sort(delegate(Tuple<int, string> a, Tuple<int, string> b) { return a.Item1.CompareTo(b.Item1); });
+                var uniqHeaders = new List<string>();
+                var seenH = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                for (int i = 0; i < headers.Count && uniqHeaders.Count < 16; i++)
+                {
+                    if (seenH.Add(headers[i].Item2)) uniqHeaders.Add(headers[i].Item2);
+                }
+
+                // Bottom-most visible messages right above the composer come first
+                bodies.Sort(delegate(Tuple<int, string> a, Tuple<int, string> b) { return b.Item1.CompareTo(a.Item1); });
+                var uniqBodies = new List<string>();
+                var seenB = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                for (int i = 0; i < bodies.Count && uniqBodies.Count < 24; i++)
+                {
+                    if (seenB.Add(bodies[i].Item2)) uniqBodies.Add(bodies[i].Item2);
+                }
+
+                headerTexts = uniqHeaders.ToArray();
+                bodyTexts = uniqBodies.ToArray();
+            }
+            catch { }
         }
 
         private static bool LooksLikeContext(string name, string cls)

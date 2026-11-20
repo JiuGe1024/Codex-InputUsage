@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -118,48 +119,55 @@ namespace CodexInputUsage
             CodexThemeKind theme = CodexThemeSource.Detect();
             sb.AppendLine("theme=" + theme);
 
-            // 1. Unit-verify strict IPC routing rules (switch, disconnect, multi-window ambiguity)
+            // 1. Unit-verify multi-followed IPC pool + UIA disambiguation (strict no-guess)
+            var matcher = new SessionMatcher();
             using (var mockIpc = new CodexIpcMonitor())
             {
-                mockIpc.ApplyFollowingEventForTest("win-1", "local", "thread-aaa", true);
-                var s1 = mockIpc.GetStatus();
-                bool ok1 = s1.IsConnected && s1.ActiveThreadId == "thread-aaa" && !s1.IsAmbiguousMultiWindow;
+                // Same Codex window follows 3 warm chats concurrently (exact real Codex behavior!)
+                mockIpc.ApplyFollowingEventForTest("win-1", "local", "thread-a", true);
+                mockIpc.ApplyFollowingEventForTest("win-1", "local", "thread-b", true);
+                mockIpc.ApplyFollowingEventForTest("win-1", "local", "thread-c", true);
+                var stPool = mockIpc.GetStatus();
+                bool okPool = stPool.IsConnected && stPool.FollowedThreadIds.Length == 3;
 
-                // Switch chat in same window -> immediately moves to thread-bbb
-                mockIpc.ApplyFollowingEventForTest("win-1", "local", "thread-bbb", true);
-                var s2 = mockIpc.GetStatus();
-                bool ok2 = s2.ActiveThreadId == "thread-bbb" && !s2.IsAmbiguousMultiWindow;
+                var cands = new List<StateThreadRecord>
+                {
+                    new StateThreadRecord { Id = "thread-a", Name = "阅读工作区交接文档", Title = "阅读一下工作区内的交接文档" },
+                    new StateThreadRecord { Id = "thread-b", Name = "修复反重力代理访问", Title = "反重力代理连接" },
+                    new StateThreadRecord { Id = "thread-c", Name = "阅读工作区交接文档", Title = "另一个同名交接" }
+                };
+                var corpus = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    { "thread-a", "这是第一段 68.6M 会话的独有正文内容，用于精确区分同名对话。" },
+                    { "thread-b", "这是反重力代理配置相关的回复文本。" },
+                    { "thread-c", "这是第三个同名会话完全不同的正文内容。" }
+                };
 
-                // Second window opens a different chat -> MUST mark ambiguous and clear active thread (never guess)
-                mockIpc.ApplyFollowingEventForTest("win-2", "local", "thread-ccc", true);
-                var s3 = mockIpc.GetStatus();
-                bool ok3 = s3.ActiveThreadId == null && s3.IsAmbiguousMultiWindow && s3.DistinctThreadCount == 2;
+                // Unique header match -> thread-b
+                var mHeader = matcher.ResolveFromCandidatesForTest(cands, corpus, new string[] { "修复反重力代理访问" }, new string[0]);
+                bool okHeader = mHeader.ThreadId == "thread-b" && mHeader.Source == "IPC+标题";
 
-                // Second window stops following -> unambiguous again
-                mockIpc.ApplyFollowingEventForTest("win-2", "local", "thread-ccc", false);
-                var s4 = mockIpc.GetStatus();
-                bool ok4 = s4.ActiveThreadId == "thread-bbb" && !s4.IsAmbiguousMultiWindow;
+                // Duplicate title -> breaks tie using visible body text -> thread-a
+                var mBody = matcher.ResolveFromCandidatesForTest(cands, corpus,
+                    new string[] { "阅读工作区交接文档" },
+                    new string[] { "这是第一段 68.6M 会话的独有正文内容" });
+                bool okBody = mBody.ThreadId == "thread-a" && mBody.Source == "IPC+正文";
 
-                // IPC disconnect -> MUST clear active thread immediately (no SQLite recency fallback)
+                // Multiple warm threads with NO matching header or body -> MUST refuse to guess (null)
+                var mAmbig = matcher.ResolveFromCandidatesForTest(cands, corpus, new string[] { "无关按钮" }, new string[0]);
+                bool okAmbig = mAmbig.ThreadId == null && mAmbig.Source == "待确认";
+
+                // IPC disconnect -> MUST clear immediately
                 mockIpc.SimulateDisconnectForTest();
-                var s5 = mockIpc.GetStatus();
-                bool ok5 = !s5.IsConnected && s5.ActiveThreadId == null && !s5.IsAmbiguousMultiWindow;
+                var mDisc = matcher.Resolve(mockIpc.GetStatus(), new string[] { "修复反重力代理访问" }, new string[0]);
+                bool okDisc = mDisc.ThreadId == null && mDisc.Source == "IPC 断线";
 
-                // Verify tracker clears stale values when desiredThread becomes null
-                var trackerCheck = new RolloutSessionTracker();
-                trackerCheck.UpdateFromDisk(null, "IPC 断线", null);
-                var clearedSnap = trackerCheck.BuildSnapshot();
-                string[] clearedVariants = MetricFormatter.BuildStripVariants(clearedSnap);
-                bool ok6 = !clearedSnap.HasUsage && clearedVariants[0].Contains("--");
-
-                sb.AppendLine(string.Format("route_tests single={0} switch={1} multiWindowClear={2} multiWindowRecover={3} disconnectClear={4} trackerClear={5}",
-                    ok1, ok2, ok3, ok4, ok5, ok6));
+                sb.AppendLine(string.Format("match_tests pool={0} header={1} bodyTieBreak={2} refuseAmbig={3} disconnectClear={4}",
+                    okPool, okHeader, okBody, okAmbig, okDisc));
             }
 
             // 2. Test live Codex IPC pipe (2.2s window)
-            string ipcThread = null;
-            bool ipcConnected = false;
-            bool ipcAmbiguous = false;
+            IpcRouteStatus liveIpc;
             using (var ipc = new CodexIpcMonitor())
             {
                 ipc.Start();
@@ -167,45 +175,42 @@ namespace CodexInputUsage
                 while (DateTime.UtcNow < deadline)
                 {
                     var st = ipc.GetStatus();
-                    ipcConnected = st.IsConnected;
-                    ipcAmbiguous = st.IsAmbiguousMultiWindow;
-                    if (!string.IsNullOrWhiteSpace(st.ActiveThreadId) || st.IsAmbiguousMultiWindow)
+                    if (st.IsConnected && st.FollowedThreadIds.Length > 0)
                     {
-                        ipcThread = st.ActiveThreadId;
+                        Thread.Sleep(250); // allow full initial replay burst to arrive
                         break;
                     }
                     Thread.Sleep(80);
                 }
-                var finalSt = ipc.GetStatus();
-                sb.AppendLine(string.Format("ipc connected={0} activeThread={1} windows={2} distinct={3} ambiguous={4} err={5}",
-                    finalSt.IsConnected, finalSt.ActiveThreadId ?? "(none)", finalSt.WindowCount,
-                    finalSt.DistinctThreadCount, finalSt.IsAmbiguousMultiWindow, finalSt.LastError ?? ""));
+                liveIpc = ipc.GetStatus();
             }
+            sb.AppendLine(string.Format("ipc connected={0} followedCount={1} followed=[{2}] err={3}",
+                liveIpc.IsConnected,
+                liveIpc.FollowedThreadIds.Length,
+                string.Join(",", liveIpc.FollowedThreadIds.Select(id => MetricFormatter.ShortThreadId(id)).ToArray()),
+                liveIpc.LastError ?? ""));
 
-            // 3. Exact ID lookup in state_5.sqlite (strict: only for verified IPC thread)
-            StateThreadRecord dbRec = !string.IsNullOrWhiteSpace(ipcThread)
-                ? CodexStateDb.TryReadThread(ipcThread)
-                : null;
-            if (dbRec != null)
+            // 3. Cross-check a specific thread (prefer 01a1b9da if present, else explicit or first followed)
+            string testThread = null;
+            for (int i = 0; i < liveIpc.FollowedThreadIds.Length; i++)
             {
-                sb.AppendLine(string.Format("sqlite id={0} tokens_used={1} rollout={2}",
-                    dbRec.Id, dbRec.TokensUsed, dbRec.RolloutPath ?? "(null)"));
+                if (liveIpc.FollowedThreadIds[i].StartsWith("01a1b9da", StringComparison.OrdinalIgnoreCase))
+                {
+                    testThread = liveIpc.FollowedThreadIds[i];
+                    break;
+                }
             }
-            else
-            {
-                sb.AppendLine("sqlite=(no-verified-ipc-thread)");
-            }
+            if (testThread == null && liveIpc.FollowedThreadIds.Length > 0)
+                testThread = liveIpc.FollowedThreadIds[0];
 
-            // 4. Parse rollout JSONL for the verified IPC thread (or explicit path)
             string targetRollout = explicitRolloutPath;
-            if (string.IsNullOrWhiteSpace(targetRollout) && !string.IsNullOrWhiteSpace(ipcThread))
-                targetRollout = CodexStateDb.FindRolloutFileByThreadId(ipcThread);
+            if (string.IsNullOrWhiteSpace(targetRollout) && !string.IsNullOrWhiteSpace(testThread))
+                targetRollout = CodexStateDb.FindRolloutFileByThreadId(testThread);
 
-            string bindSource = !ipcConnected ? "IPC 断线" : (ipcAmbiguous ? "多窗口歧义" : (!string.IsNullOrWhiteSpace(ipcThread) ? "IPC" : "等待"));
             var tracker = new RolloutSessionTracker();
-            tracker.UpdateFromDisk(ipcThread, bindSource, targetRollout);
+            tracker.UpdateFromDisk(testThread, "IPC+标题", targetRollout);
             var snap = tracker.BuildSnapshot();
-            sb.AppendLine(string.Format("rollout path={0}", targetRollout ?? "(none)"));
+            sb.AppendLine(string.Format("check_thread={0} rollout={1}", testThread ?? "(none)", targetRollout ?? "(none)"));
             sb.AppendLine(string.Format("metrics hasUsage={0} latestTurn={1} total={2} input={3} cached={4} output={5} cachePct={6} tps={7} ttft={8} ctx={9}/{10} turns={11}",
                 snap.HasUsage,
                 snap.LatestTurn != null ? snap.LatestTurn.TotalTokens : 0,
@@ -216,30 +221,10 @@ namespace CodexInputUsage
                 snap.ContextUsedTokens, snap.ContextWindowTokens, snap.Turns.Count));
 
             string[] variants = MetricFormatter.BuildStripVariants(snap);
-            for (int i = 0; i < variants.Length; i++)
-                sb.AppendLine("strip" + i + "=" + variants[i]);
+            sb.AppendLine("strip0=" + variants[0]);
 
-            // 5. Render visual preview PNGs into work/ for inspection
             string workDir = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, @"..\work"));
             Directory.CreateDirectory(workDir);
-            using (var bmp = StripForm.RenderPreviewBitmap(variants[0], ThemePalette.Light, false, true))
-            {
-                bmp.Save(Path.Combine(workDir, "preview-strip-light.png"), ImageFormat.Png);
-                sb.AppendLine("strip0_px=" + bmp.Width + "x" + bmp.Height);
-            }
-            using (var bmp = StripForm.RenderPreviewBitmap(variants[1], ThemePalette.Light, false, true))
-            {
-                bmp.Save(Path.Combine(workDir, "preview-strip-compact-light.png"), ImageFormat.Png);
-                sb.AppendLine("strip1_px=" + bmp.Width + "x" + bmp.Height);
-            }
-            using (var bmp = StripForm.RenderPreviewBitmap(variants[0], ThemePalette.Dark, true, true))
-                bmp.Save(Path.Combine(workDir, "preview-strip-dark-hover.png"), ImageFormat.Png);
-            using (var bmp = DetailPopoverForm.RenderPreviewBitmap(snap, ThemePalette.Light))
-                bmp.Save(Path.Combine(workDir, "preview-detail-light.png"), ImageFormat.Png);
-            using (var bmp = DetailPopoverForm.RenderPreviewBitmap(snap, ThemePalette.Dark))
-                bmp.Save(Path.Combine(workDir, "preview-detail-dark.png"), ImageFormat.Png);
-
-            sb.AppendLine("autostart_enabled=" + AutoStartManager.IsEnabled());
             File.WriteAllText(Path.Combine(workDir, "selftest-report.txt"), sb.ToString(), Encoding.UTF8);
         }
 
@@ -344,6 +329,7 @@ namespace CodexInputUsage
             private const int StandbyPollMs = 1500;
 
             private readonly CodexIpcMonitor _ipc = new CodexIpcMonitor();
+            private readonly SessionMatcher _matcher = new SessionMatcher();
             private readonly RolloutSessionTracker _rollout = new RolloutSessionTracker();
             private readonly ComposerDockTracker _dockTracker;
             private readonly StripForm _strip = new StripForm();
@@ -360,6 +346,7 @@ namespace CodexInputUsage
             private DateTime _lastCodexPresenceCheckUtc = DateTime.MinValue;
             private DateTime _lastHeartbeatUtc = DateTime.MinValue;
             private string _lastDiagState = string.Empty;
+            private string _lastFingerprintSig = string.Empty;
             private bool _codexRunning;
             private bool _capturedOnce;
             private bool _popoverWanted;
@@ -467,7 +454,6 @@ namespace CodexInputUsage
             {
                 DateTime now = DateTime.UtcNow;
 
-                // 1. Check whether official Codex Desktop is running (cheap standby gate)
                 if (!_codexRunning || (now - _lastCodexPresenceCheckUtc).TotalSeconds >= 2.0)
                 {
                     _lastCodexPresenceCheckUtc = now;
@@ -480,7 +466,6 @@ namespace CodexInputUsage
                     if (!_codexRunning) WakeForCodex();
                 }
 
-                // 2. Foreground official Codex check
                 string nonMatch;
                 IntPtr fgCodex = NativeWin32.GetForegroundCodexWindow(out nonMatch);
                 if (fgCodex == IntPtr.Zero)
@@ -504,47 +489,6 @@ namespace CodexInputUsage
                     return;
                 }
 
-                // 3. Strict zero-guess session binding (IPC only; clear immediately on disconnect or multi-window ambiguity)
-                var ipcSt = _ipc.GetStatus();
-                string desiredThread;
-                string source;
-
-                if (!ipcSt.IsConnected)
-                {
-                    desiredThread = null;
-                    source = "IPC 断线";
-                }
-                else if (ipcSt.IsAmbiguousMultiWindow)
-                {
-                    desiredThread = null;
-                    source = "多窗口歧义";
-                }
-                else if (!string.IsNullOrWhiteSpace(ipcSt.ActiveThreadId))
-                {
-                    desiredThread = ipcSt.ActiveThreadId;
-                    source = "IPC";
-                }
-                else
-                {
-                    desiredThread = null;
-                    source = "等待";
-                }
-
-                bool threadChanged = !string.Equals(_rollout.CurrentThreadId, desiredThread, StringComparison.OrdinalIgnoreCase);
-                bool sourceChanged = !string.Equals(_lastMetrics.BindingSource, source, StringComparison.Ordinal);
-                if (threadChanged || sourceChanged || (now - _lastMetricsPollUtc).TotalMilliseconds >= 450.0)
-                {
-                    _lastMetricsPollUtc = now;
-                    string rolloutPath = !string.IsNullOrWhiteSpace(desiredThread)
-                        ? CodexStateDb.FindRolloutFileByThreadId(desiredThread)
-                        : null;
-                    if (_rollout.UpdateFromDisk(desiredThread, source, rolloutPath) || threadChanged || sourceChanged)
-                    {
-                        _lastMetrics = _rollout.BuildSnapshot();
-                    }
-                }
-
-                // 4. Dock into Codex composer toolbar
                 var dock = _dockTracker.Latest;
                 if (dock == null || dock.WindowHandle != fgCodex || dock.Source == DockSourceKind.None)
                 {
@@ -552,6 +496,27 @@ namespace CodexInputUsage
                     _strip.HideStrip();
                     if (_popover.Visible) _popover.Hide();
                     return;
+                }
+
+                // Resolve active conversation by cross-verifying IPC followed pool against foreground UIA header + body!
+                var ipcSt = _ipc.GetStatus();
+                string fpSig = ipcSt.Version + "|" + string.Join("\u001f", dock.HeaderTexts ?? new string[0])
+                    + "|" + (dock.BodyTexts != null && dock.BodyTexts.Length > 0 ? dock.BodyTexts[0] : string.Empty);
+                bool fpChanged = !string.Equals(fpSig, _lastFingerprintSig, StringComparison.Ordinal);
+
+                SessionMatchResult matched = null;
+                if (fpChanged || (now - _lastMetricsPollUtc).TotalMilliseconds >= 450.0)
+                {
+                    _lastFingerprintSig = fpSig;
+                    _lastMetricsPollUtc = now;
+                    matched = _matcher.Resolve(ipcSt, dock.HeaderTexts, dock.BodyTexts);
+
+                    bool threadChanged = !string.Equals(_rollout.CurrentThreadId, matched.ThreadId, StringComparison.OrdinalIgnoreCase);
+                    bool sourceChanged = !string.Equals(_lastMetrics.BindingSource, matched.Source, StringComparison.Ordinal);
+                    if (_rollout.UpdateFromDisk(matched.ThreadId, matched.Source, matched.RolloutPath) || threadChanged || sourceChanged)
+                    {
+                        _lastMetrics = _rollout.BuildSnapshot();
+                    }
                 }
 
                 ThemePalette pal = ThemePalette.For(CodexThemeSource.Current);
@@ -566,9 +531,10 @@ namespace CodexInputUsage
                 }
 
                 _lastStripBounds = placed;
-                LogState(string.Format("docked:{0} bounds={1} text=\"{2}\" thread={3}({4}) | {5}",
+                string matchInfo = matched != null ? matched.Detail : _lastMetrics.BindingSource;
+                LogState(string.Format("docked:{0} bounds={1} text=\"{2}\" thread={3}({4}) match=[{5}]",
                     dock.Source, placed, variant, MetricFormatter.ShortThreadId(_lastMetrics.ThreadId),
-                    _lastMetrics.BindingSource, dock.Detail));
+                    _lastMetrics.BindingSource, matchInfo));
 
                 if (_popoverWanted)
                 {

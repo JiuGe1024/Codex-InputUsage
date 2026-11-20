@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -9,7 +10,9 @@ namespace CodexInputUsage
     {
         internal string Id;
         internal string RolloutPath;
+        internal string Name;
         internal string Title;
+        internal string FirstUserMessage;
         internal long TokensUsed;
         internal long RecencyAtMs;
     }
@@ -20,7 +23,7 @@ namespace CodexInputUsage
         private const int SqliteOk = 0;
         private const int SqliteRow = 100;
 
-        private const string ThreadColumns = "id, rollout_path, title, tokens_used, recency_at_ms";
+        private const string ThreadColumns = "id, rollout_path, name, title, first_user_message, tokens_used, recency_at_ms";
 
         [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
         private static extern int sqlite3_open_v2(IntPtr filename, out IntPtr db, int flags, IntPtr vfs);
@@ -54,18 +57,31 @@ namespace CodexInputUsage
         internal static StateThreadRecord TryReadThread(string threadId)
         {
             if (string.IsNullOrWhiteSpace(threadId)) return null;
-            return QuerySingle(
+            var rows = QueryRows(
                 ResolveDatabasePath(),
                 "SELECT " + ThreadColumns + " FROM threads WHERE id = ?1 LIMIT 1",
-                threadId);
+                new string[] { threadId });
+            return rows.Count > 0 ? rows[0] : null;
+        }
+
+        internal static List<StateThreadRecord> TryReadRecentThreads(int limit)
+        {
+            if (limit <= 0) limit = 30;
+            return QueryRows(
+                ResolveDatabasePath(),
+                "SELECT " + ThreadColumns + " FROM threads WHERE archived = 0 ORDER BY recency_at_ms DESC LIMIT " + limit,
+                null);
         }
 
         internal static string FindRolloutFileByThreadId(string threadId)
         {
             if (string.IsNullOrWhiteSpace(threadId)) return null;
             StateThreadRecord rec = TryReadThread(threadId);
-            if (rec != null && !string.IsNullOrWhiteSpace(rec.RolloutPath) && File.Exists(rec.RolloutPath))
-                return rec.RolloutPath;
+            if (rec != null && !string.IsNullOrWhiteSpace(rec.RolloutPath))
+            {
+                string clean = NormalizeWinPath(rec.RolloutPath);
+                if (File.Exists(clean)) return clean;
+            }
 
             string sessionsRoot = Path.Combine(CodexThemeSource.GetCodexHome(), "sessions");
             if (!Directory.Exists(sessionsRoot)) return null;
@@ -79,53 +95,68 @@ namespace CodexInputUsage
             return null;
         }
 
-        private static StateThreadRecord QuerySingle(string dbPath, string sql, string parameter)
+        internal static string NormalizeWinPath(string path)
         {
-            if (string.IsNullOrWhiteSpace(dbPath) || !File.Exists(dbPath)) return null;
+            if (string.IsNullOrWhiteSpace(path)) return path;
+            if (path.StartsWith(@"\\?\", StringComparison.Ordinal))
+                return path.Substring(4);
+            return path;
+        }
+
+        private static List<StateThreadRecord> QueryRows(string dbPath, string sql, string[] parameters)
+        {
+            var result = new List<StateThreadRecord>();
+            if (string.IsNullOrWhiteSpace(dbPath) || !File.Exists(dbPath)) return result;
 
             IntPtr db = IntPtr.Zero;
             IntPtr stmt = IntPtr.Zero;
             IntPtr dbPtr = IntPtr.Zero;
             IntPtr sqlPtr = IntPtr.Zero;
-            IntPtr paramPtr = IntPtr.Zero;
+            var paramPtrs = new List<IntPtr>();
 
             try
             {
                 dbPtr = AllocUtf8(dbPath);
-                if (sqlite3_open_v2(dbPtr, out db, SqliteOpenReadOnly, IntPtr.Zero) != SqliteOk) return null;
+                if (sqlite3_open_v2(dbPtr, out db, SqliteOpenReadOnly, IntPtr.Zero) != SqliteOk) return result;
 
                 sqlPtr = AllocUtf8(sql);
-                if (sqlite3_prepare_v2(db, sqlPtr, -1, out stmt, IntPtr.Zero) != SqliteOk) return null;
+                if (sqlite3_prepare_v2(db, sqlPtr, -1, out stmt, IntPtr.Zero) != SqliteOk) return result;
 
-                if (parameter != null)
+                if (parameters != null)
                 {
-                    paramPtr = AllocUtf8(parameter);
-                    if (sqlite3_bind_text(stmt, 1, paramPtr, -1, IntPtr.Zero) != SqliteOk) return null;
+                    for (int i = 0; i < parameters.Length; i++)
+                    {
+                        IntPtr p = AllocUtf8(parameters[i] ?? string.Empty);
+                        paramPtrs.Add(p);
+                        if (sqlite3_bind_text(stmt, i + 1, p, -1, IntPtr.Zero) != SqliteOk) return result;
+                    }
                 }
 
-                if (sqlite3_step(stmt) != SqliteRow) return null;
-
-                return new StateThreadRecord
+                while (sqlite3_step(stmt) == SqliteRow)
                 {
-                    Id = ReadUtf8(stmt, 0) ?? string.Empty,
-                    RolloutPath = ReadUtf8(stmt, 1),
-                    Title = ReadUtf8(stmt, 2),
-                    TokensUsed = sqlite3_column_int64(stmt, 3),
-                    RecencyAtMs = sqlite3_column_int64(stmt, 4)
-                };
+                    result.Add(new StateThreadRecord
+                    {
+                        Id = ReadUtf8(stmt, 0) ?? string.Empty,
+                        RolloutPath = NormalizeWinPath(ReadUtf8(stmt, 1)),
+                        Name = ReadUtf8(stmt, 2),
+                        Title = ReadUtf8(stmt, 3),
+                        FirstUserMessage = ReadUtf8(stmt, 4),
+                        TokensUsed = sqlite3_column_int64(stmt, 5),
+                        RecencyAtMs = sqlite3_column_int64(stmt, 6)
+                    });
+                }
             }
-            catch
-            {
-                return null;
-            }
+            catch { }
             finally
             {
                 if (stmt != IntPtr.Zero) { try { sqlite3_finalize(stmt); } catch { } }
                 if (db != IntPtr.Zero) { try { sqlite3_close_v2(db); } catch { } }
                 if (dbPtr != IntPtr.Zero) Marshal.FreeHGlobal(dbPtr);
                 if (sqlPtr != IntPtr.Zero) Marshal.FreeHGlobal(sqlPtr);
-                if (paramPtr != IntPtr.Zero) Marshal.FreeHGlobal(paramPtr);
+                for (int i = 0; i < paramPtrs.Count; i++) Marshal.FreeHGlobal(paramPtrs[i]);
             }
+
+            return result;
         }
 
         private static IntPtr AllocUtf8(string value)

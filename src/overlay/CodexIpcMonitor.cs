@@ -12,10 +12,8 @@ namespace CodexInputUsage
 {
     internal sealed class IpcRouteStatus
     {
-        internal string ActiveThreadId;
-        internal int WindowCount;
-        internal int DistinctThreadCount;
-        internal bool IsAmbiguousMultiWindow;
+        internal string[] FollowedThreadIds = new string[0];
+        internal string LastFollowedThreadId;
         internal bool IsConnected;
         internal long Version;
         internal string LastError;
@@ -27,20 +25,23 @@ namespace CodexInputUsage
         private const int MaxJsonFrameBytes = 4 * 1024 * 1024;
         private const string SourceClientId = "codex-inputusage";
 
-        private sealed class ActiveConv
+        private sealed class FollowedEntry
         {
+            internal string SourceClient;
+            internal string HostId;
             internal string ThreadId;
             internal long Sequence;
         }
 
         private readonly object _sync = new object();
-        private readonly Dictionary<string, ActiveConv> _activeByWindow = new Dictionary<string, ActiveConv>(StringComparer.Ordinal);
+        // Keyed by (sourceClient, hostId, conversationId) so multiple warm followed threads
+        // from the same Codex window never silently overwrite each other.
+        private readonly Dictionary<string, FollowedEntry> _followed = new Dictionary<string, FollowedEntry>(StringComparer.OrdinalIgnoreCase);
         private readonly JavaScriptSerializer _json = new JavaScriptSerializer { MaxJsonLength = MaxJsonFrameBytes };
         private CancellationTokenSource _cts;
         private Task _runner;
-        private string _activeThreadId;
-        private int _distinctThreadCount;
-        private bool _isAmbiguousMultiWindow;
+        private string[] _cachedThreadIds = new string[0];
+        private string _lastFollowedThreadId;
         private string _lastError;
         private bool _isConnected;
         private long _sequence;
@@ -88,10 +89,8 @@ namespace CodexInputUsage
             {
                 return new IpcRouteStatus
                 {
-                    ActiveThreadId = _activeThreadId,
-                    WindowCount = _activeByWindow.Count,
-                    DistinctThreadCount = _distinctThreadCount,
-                    IsAmbiguousMultiWindow = _isAmbiguousMultiWindow,
+                    FollowedThreadIds = (string[])_cachedThreadIds.Clone(),
+                    LastFollowedThreadId = _lastFollowedThreadId,
                     IsConnected = _isConnected,
                     Version = _version,
                     LastError = _lastError
@@ -106,11 +105,10 @@ namespace CodexInputUsage
 
         internal void ApplyFollowingEventForTest(string sourceClient, string hostId, string convId, bool following)
         {
-            string key = (string.IsNullOrWhiteSpace(sourceClient) ? "unattributed" : sourceClient) + "\u001f" + hostId;
             lock (_sync)
             {
                 _isConnected = true;
-                ApplyFollowingLocked(key, convId, following);
+                ApplyFollowingLocked(sourceClient, hostId, convId, following);
             }
         }
 
@@ -233,12 +231,14 @@ namespace CodexInputUsage
                     string clientId = GetString(parameters, "clientId");
                     if (!string.IsNullOrWhiteSpace(clientId))
                     {
-                        string prefix = clientId + "\u001f";
                         lock (_sync)
                         {
-                            var toRemove = _activeByWindow.Keys.Where(k => k.StartsWith(prefix, StringComparison.Ordinal)).ToArray();
-                            for (int i = 0; i < toRemove.Length; i++) _activeByWindow.Remove(toRemove[i]);
-                            RecomputeActiveThreadLocked();
+                            var toRemove = _followed
+                                .Where(kv => string.Equals(kv.Value.SourceClient, clientId, StringComparison.OrdinalIgnoreCase))
+                                .Select(kv => kv.Key)
+                                .ToArray();
+                            for (int i = 0; i < toRemove.Length; i++) _followed.Remove(toRemove[i]);
+                            RebuildSnapshotLocked();
                         }
                     }
                 }
@@ -255,30 +255,32 @@ namespace CodexInputUsage
 
             bool following = (bool)followingObj;
             string sourceClient = GetString(root, "sourceClientId");
-            string key = (string.IsNullOrWhiteSpace(sourceClient) ? "unattributed" : sourceClient) + "\u001f" + hostId;
 
             lock (_sync)
             {
-                ApplyFollowingLocked(key, convId, following);
+                ApplyFollowingLocked(sourceClient, hostId, convId, following);
             }
         }
 
-        private void ApplyFollowingLocked(string key, string convId, bool following)
+        private void ApplyFollowingLocked(string sourceClient, string hostId, string convId, bool following)
         {
+            string normClient = string.IsNullOrWhiteSpace(sourceClient) ? "unattributed" : sourceClient;
+            string key = normClient + "\u001f" + hostId + "\u001f" + convId;
             if (following)
             {
-                _activeByWindow[key] = new ActiveConv { ThreadId = convId, Sequence = ++_sequence };
+                _followed[key] = new FollowedEntry
+                {
+                    SourceClient = normClient,
+                    HostId = hostId,
+                    ThreadId = convId,
+                    Sequence = ++_sequence
+                };
             }
             else
             {
-                ActiveConv cur;
-                if (_activeByWindow.TryGetValue(key, out cur)
-                    && string.Equals(cur.ThreadId, convId, StringComparison.OrdinalIgnoreCase))
-                {
-                    _activeByWindow.Remove(key);
-                }
+                _followed.Remove(key);
             }
-            RecomputeActiveThreadLocked();
+            RebuildSnapshotLocked();
         }
 
         private void MarkConnected()
@@ -297,41 +299,28 @@ namespace CodexInputUsage
             {
                 _isConnected = false;
                 if (!string.IsNullOrWhiteSpace(error)) _lastError = error;
-                _activeByWindow.Clear();
-                _activeThreadId = null;
-                _distinctThreadCount = 0;
-                _isAmbiguousMultiWindow = false;
+                _followed.Clear();
+                _cachedThreadIds = new string[0];
+                _lastFollowedThreadId = null;
                 _version++;
             }
         }
 
-        private void RecomputeActiveThreadLocked()
+        private void RebuildSnapshotLocked()
         {
-            // Strict no-guess policy: if multiple Codex windows are simultaneously following
-            // different conversations, IPC does not carry the Win32 HWND, so refuse to guess
-            // and clear the active thread until unambiguous.
-            var distinct = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            string singleThread = null;
-            foreach (var kv in _activeByWindow)
+            var ordered = _followed.Values
+                .OrderByDescending(x => x.Sequence)
+                .ToList();
+            var unique = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < ordered.Count; i++)
             {
-                if (!string.IsNullOrWhiteSpace(kv.Value.ThreadId))
-                {
-                    distinct.Add(kv.Value.ThreadId);
-                    singleThread = kv.Value.ThreadId;
-                }
+                if (seen.Add(ordered[i].ThreadId))
+                    unique.Add(ordered[i].ThreadId);
             }
-
-            _distinctThreadCount = distinct.Count;
-            bool ambiguous = distinct.Count > 1;
-            string next = distinct.Count == 1 ? singleThread : null;
-
-            if (!string.Equals(_activeThreadId, next, StringComparison.OrdinalIgnoreCase)
-                || _isAmbiguousMultiWindow != ambiguous)
-            {
-                _activeThreadId = next;
-                _isAmbiguousMultiWindow = ambiguous;
-                _version++;
-            }
+            _cachedThreadIds = unique.ToArray();
+            _lastFollowedThreadId = unique.Count > 0 ? unique[0] : null;
+            _version++;
         }
 
         private static string GetString(Dictionary<string, object> dict, string key)
