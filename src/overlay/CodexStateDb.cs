@@ -71,7 +71,7 @@ namespace CodexInputUsage
             string limitClause = limit > 0 ? " LIMIT " + limit : string.Empty;
             return QueryRows(
                 ResolveDatabasePath(),
-                "SELECT " + ThreadColumns + " FROM threads WHERE archived = 0 ORDER BY recency_at_ms DESC" + limitClause,
+                "SELECT " + ThreadColumns + " FROM threads WHERE archived = 0 AND (source IS NULL OR source NOT LIKE '{\"subagent\"%') ORDER BY recency_at_ms DESC" + limitClause,
                 null);
         }
 

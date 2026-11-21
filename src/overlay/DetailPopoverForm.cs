@@ -541,7 +541,8 @@ namespace CodexInputUsage
             string src = string.IsNullOrWhiteSpace(snap.BindingSource) ? "等待" : snap.BindingSource;
             Color badgeColor;
             string badgeText;
-            if (src.StartsWith("IPC+", StringComparison.Ordinal) || src == "IPC")
+            if (src.StartsWith("IPC+", StringComparison.Ordinal) || src == "IPC"
+                || src.StartsWith("本地+", StringComparison.Ordinal))
             {
                 badgeColor = pal.TierGood;
                 badgeText = src == "IPC" ? "IPC 绑定" : src;

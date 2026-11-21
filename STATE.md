@@ -4,13 +4,13 @@
 
 ## 核心架构（无 CDP 路线）
 
-产物 `outputs/Codex-InputUsage-Overlay.exe`（.NET Framework 4.x `csc.exe` 零外部依赖构建，124 KB）随 Windows 原生 Microsoft Store 版 Codex Desktop 伴随运行，源码全部位于 `src/overlay/`：
+产物 `outputs/Codex-InputUsage-Overlay.exe`（.NET Framework 4.x `csc.exe` 零外部依赖构建，144 KB）随 Windows 原生 Microsoft Store 版 Codex Desktop 伴随运行，源码全部位于 `src/overlay/`：
 
 | 模块 | 职责 |
 |---|---|
-| `src/overlay/CodexIpcMonitor.cs` | 只读连接 `\\.\pipe\codex-ipc`（4 字节 LE 帧 + UTF-8 JSON），维护完整活跃订阅池（按 `(sourceClientId, hostId, conversationId)` 去重），并在路由变更时即时触发回调 |
-| `src/overlay/SessionMatcher.cs` | 优先使用 IPC 订阅池与前台 UIA 标题或正文；IPC 不可用时匹配本地会话的唯一精确标题或至少两段可见正文。仅有正文时最多检查最近 12 个会话。证据不足时显示 `--` |
-| `src/overlay/CodexStateDb.cs` | 通过系统内置 `winsqlite3.dll` 只读查询 `~/.codex/state_5.sqlite`，精确主键查 `rollout_path` / `name` / `title` / `model` / `reasoning_effort`，不做最近聊天猜测 |
+| `src/overlay/CodexIpcMonitor.cs` | 可选只读连接 `\\.\pipe\codex-ipc`（先 `WaitNamedPipe` 快速探测，无管道时退避至 15s 且不触发无效唤醒）；旧版 Codex 有管道时维护完整活跃订阅池，新版 Codex（`26.1117+` 已移除该管道）零开销静默退让 |
+| `src/overlay/SessionMatcher.cs` | 优先使用 IPC 订阅池 + 前台 UIA；IPC 不可用时全量匹配本机真实用户会话（自动缓存 `state_5.sqlite`、已剔除 `Guardian review` 等子代理行）：先精确/截断前缀匹配标题（`本地+标题`），再对全部现存 rollout（头 256KB + 尾 2MB 语料缓存，最多 80 个）做严格正文消歧（`本地+正文`）；证据不足时拒绝猜测并清空显示 `--` |
+| `src/overlay/CodexStateDb.cs` | 通过系统内置 `winsqlite3.dll` 只读查询 `~/.codex/state_5.sqlite`，精确主键查 `rollout_path` / `name` / `title` / `model` / `reasoning_effort`，列表查询自动排除 `{"subagent"...}` 内部子代理线程 |
 | `src/overlay/AccountQuotaReader.cs` | 扫描本机最近写入的 Codex rollout 尾部，提取账号级实时 `rate_limits`（5h / 周额度 + `resets_at` + `credits`），确保查看旧对话时也显示此刻实时余额与重置倒计时 |
 | `src/overlay/RolloutMetrics.cs` | 增量字节偏移解析 rollout JSONL：去重统计每轮与会话累计 Token、缓存命中率、会话加权均速（Avg TPS）；TPS 分母采用 `整轮耗时 - (工具区间并集 - 与模型重叠)`；解析 `world_state`/`response_item`/`additional_tools`/`compacted` 生成十通道上下文拆分并按 Hamilton 最大余数法等比缩放至官方 `ContextUsedTokens` |
 | `src/overlay/ComposerDock.cs` | 独立 MTA 线程通过 UIA 定位 `ProseMirror -> composer -> Context 圆环 / 模型选择器 / 左侧按钮簇`，支持单次快速重读、`AutoResetEvent` 即时唤醒与切窗锚点缓存 |

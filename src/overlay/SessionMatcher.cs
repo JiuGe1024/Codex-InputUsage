@@ -20,7 +20,9 @@ namespace CodexInputUsage
 
     internal sealed class SessionMatcher
     {
-        private const int TailCorpusBytes = 1024 * 1024;
+        private const int TailCorpusBytes = 2 * 1024 * 1024;
+        private const int HeadCorpusBytes = 256 * 1024;
+        private const int MaxLocalBodyCandidates = 80;
         private static readonly Regex MultiSpace = new Regex(@"\s+", RegexOptions.Compiled);
 
         private sealed class CachedCorpus
@@ -34,6 +36,8 @@ namespace CodexInputUsage
         private readonly JavaScriptSerializer _json = new JavaScriptSerializer { MaxJsonLength = 8 * 1024 * 1024 };
         private Dictionary<string, string> _sessionIndexNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         private DateTime _sessionIndexWriteUtc = DateTime.MinValue;
+        private List<StateThreadRecord> _recentThreadsCache;
+        private string _recentThreadsDbStamp = string.Empty;
 
         internal SessionMatchResult Resolve(
             IpcRouteStatus ipc,
@@ -42,13 +46,7 @@ namespace CodexInputUsage
         {
             if (ipc == null || !ipc.IsConnected)
             {
-                var localMatch = ResolveLocal(headerTexts, bodyTexts);
-                if (localMatch != null) return localMatch;
-                return new SessionMatchResult
-                {
-                    Source = "IPC 断线",
-                    Detail = "ipc-disconnected"
-                };
+                return ResolveLocal(headerTexts, bodyTexts);
             }
 
             string[] followed = ipc.FollowedThreadIds ?? new string[0];
@@ -96,9 +94,9 @@ namespace CodexInputUsage
             var bodyPool = headerHits.Count > 1 ? headerHits : candidates;
             if (normBodies.Length > 0)
             {
-                int bestScore, secondScore;
-                StateThreadRecord bodyWinner = MatchByBodyText(bodyPool, normBodies, out bestScore, out secondScore);
-                if (bodyWinner != null)
+                int bestScore, secondScore, bestMaxLen;
+                StateThreadRecord bodyWinner = MatchByBodyText(bodyPool, normBodies, out bestScore, out secondScore, out bestMaxLen);
+                if (bodyWinner != null && IsClearBodyWinner(bestScore, secondScore))
                 {
                     return new SessionMatchResult
                     {
@@ -168,7 +166,8 @@ namespace CodexInputUsage
                     string corpus;
                     if (!corpusById.TryGetValue(pool[i].Id, out corpus)) corpus = string.Empty;
                     string normCorpus = NormalizeText(corpus);
-                    int score = CountSnippetHits(normCorpus, normBodies);
+                    int maxLen;
+                    int score = CountSnippetHits(normCorpus, normBodies, out maxLen);
                     if (score > best) { second = best; best = score; win = pool[i]; }
                     else if (score > second) { second = score; }
                 }
@@ -182,6 +181,52 @@ namespace CodexInputUsage
                 return new SessionMatchResult { ThreadId = candidates[0].Id, Source = "IPC", Detail = "test-single" };
 
             return new SessionMatchResult { ThreadId = null, Source = "待确认", Detail = "test-ambiguous" };
+        }
+
+        internal SessionMatchResult ResolveLocalFromCandidatesForTest(
+            List<StateThreadRecord> candidates,
+            Dictionary<string, string> corpusById,
+            string[] headerTexts,
+            string[] bodyTexts)
+        {
+            string[] headers = NormalizeSnippets(headerTexts, 3, 160);
+            string[] bodies = NormalizeSnippets(bodyTexts, 14, 220);
+            if (headers.Length == 0 && bodies.Length == 0)
+                return new SessionMatchResult { Source = "IPC 断线", Detail = "test-local-empty" };
+
+            var hits = MatchByHeader(candidates, headers, false, 6);
+            if (hits.Count == 1)
+                return new SessionMatchResult { ThreadId = hits[0].Id, Source = "本地+标题", Detail = "test-local-header" };
+
+            var pool = hits.Count > 1 ? hits : candidates;
+            if (bodies.Length > 0)
+            {
+                int best = 0, second = 0, bestMaxLen = 0;
+                StateThreadRecord win = null;
+                for (int i = 0; i < pool.Count; i++)
+                {
+                    string corpus;
+                    if (!corpusById.TryGetValue(pool[i].Id, out corpus)) corpus = string.Empty;
+                    string normCorpus = NormalizeText(corpus);
+                    int maxLen;
+                    int score = CountSnippetHits(normCorpus, bodies, out maxLen);
+                    if (score > best)
+                    {
+                        second = best;
+                        best = score;
+                        bestMaxLen = maxLen;
+                        win = pool[i];
+                    }
+                    else if (score > second)
+                    {
+                        second = score;
+                    }
+                }
+                if (win != null && IsClearLocalBodyWinner(best, second, bestMaxLen))
+                    return new SessionMatchResult { ThreadId = win.Id, Source = "本地+正文", Detail = "test-local-body" };
+            }
+
+            return new SessionMatchResult { ThreadId = null, Source = "待确认", Detail = "test-local-ambiguous" };
         }
 
         private List<StateThreadRecord> LoadCandidates(string[] followedIds)
@@ -201,46 +246,136 @@ namespace CodexInputUsage
             return list;
         }
 
+        private List<StateThreadRecord> LoadAllLocalCandidates()
+        {
+            RefreshSessionIndexIfNeeded();
+            string dbPath = CodexStateDb.ResolveDatabasePath();
+            string walPath = dbPath + "-wal";
+            string stamp = BuildFileStamp(dbPath) + "|" + BuildFileStamp(walPath) + "|" + _sessionIndexWriteUtc.Ticks;
+            if (_recentThreadsCache != null && string.Equals(_recentThreadsDbStamp, stamp, StringComparison.Ordinal))
+                return _recentThreadsCache;
+
+            var candidates = CodexStateDb.TryReadRecentThreads(0);
+            for (int i = 0; i < candidates.Count; i++)
+            {
+                string name;
+                if (string.IsNullOrWhiteSpace(candidates[i].Name) && _sessionIndexNames.TryGetValue(candidates[i].Id, out name))
+                    candidates[i].Name = name;
+            }
+            _recentThreadsCache = candidates;
+            _recentThreadsDbStamp = stamp;
+            return candidates;
+        }
+
+        private static string BuildFileStamp(string path)
+        {
+            try
+            {
+                if (!File.Exists(path)) return "0";
+                var fi = new FileInfo(path);
+                return fi.LastWriteTimeUtc.Ticks + ":" + fi.Length;
+            }
+            catch { return "err"; }
+        }
+
         private SessionMatchResult ResolveLocal(string[] headerTexts, string[] bodyTexts)
         {
             var headers = NormalizeSnippets(headerTexts, 3, 160);
-            var bodies = NormalizeSnippets(bodyTexts, 12, 220)
-                .Where(s => s.Length >= 24)
-                .Select(s => s.Length > 80 ? s.Substring(0, 80) : s)
-                .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-            if (headers.Length == 0 && bodies.Length < 2) return null;
+            var bodies = NormalizeSnippets(bodyTexts, 14, 220);
+            if (headers.Length == 0 && bodies.Length == 0)
+            {
+                return new SessionMatchResult
+                {
+                    Source = "IPC 断线",
+                    Detail = "ipc-disconnected-no-ui"
+                };
+            }
 
-            RefreshSessionIndexIfNeeded();
-            var candidates = CodexStateDb.TryReadRecentThreads(headers.Length == 0 ? 12 : 0);
-            foreach (var candidate in candidates)
+            var candidates = LoadAllLocalCandidates();
+            if (candidates.Count == 0)
             {
-                string name;
-                if (string.IsNullOrWhiteSpace(candidate.Name) && _sessionIndexNames.TryGetValue(candidate.Id, out name))
-                    candidate.Name = name;
+                return new SessionMatchResult
+                {
+                    Source = "待确认",
+                    Detail = "local-no-candidates"
+                };
             }
-            var hits = MatchByHeader(candidates, headers, true);
-            StateThreadRecord winner = hits.Count == 1 ? hits[0] : null;
-            string source = "本地+标题";
-            if (winner == null && bodies.Length >= 2)
+
+            // Step 1: Exact header match first, then safe truncated prefix match (>= 6 chars) across all real user threads.
+            var headerHits = MatchByHeader(candidates, headers, false, 6);
+            if (headerHits.Count == 1)
             {
-                if (hits.Count == 0) hits = candidates.Take(12).ToList();
-                int best, second;
-                winner = MatchByBodyText(hits.FindAll(c => File.Exists(c.RolloutPath)), bodies, out best, out second);
-                if (best < 2 || second != 0) winner = null;
-                source = "本地+正文";
+                var win = headerHits[0];
+                string rollout = ResolveRollout(win);
+                return new SessionMatchResult
+                {
+                    ThreadId = win.Id,
+                    RolloutPath = rollout,
+                    ModelName = win.Model,
+                    ReasoningEffort = win.ReasoningEffort,
+                    Source = "本地+标题",
+                    Detail = string.Format("local-hdr=\"{0}\" rollout={1}",
+                        Truncate(win.Name ?? win.Title, 28),
+                        !string.IsNullOrEmpty(rollout) ? "ok" : "missing")
+                };
             }
-            if (winner == null || !File.Exists(winner.RolloutPath)) return null;
+
+            // Step 2: Visible body text match across all real user threads that have an existing rollout file
+            // (narrowed to tied header hits when duplicate titles exist).
+            int best = 0, second = 0, bestMaxLen = 0;
+            int bodyPoolCount = 0;
+            if (bodies.Length > 0)
+            {
+                var sourcePool = headerHits.Count > 1 ? headerHits : candidates;
+                var bodyPool = new List<StateThreadRecord>();
+                for (int i = 0; i < sourcePool.Count && bodyPool.Count < MaxLocalBodyCandidates; i++)
+                {
+                    string rp = sourcePool[i].RolloutPath;
+                    if (!string.IsNullOrWhiteSpace(rp) && File.Exists(rp))
+                        bodyPool.Add(sourcePool[i]);
+                }
+                bodyPoolCount = bodyPool.Count;
+
+                if (bodyPool.Count > 0)
+                {
+                    StateThreadRecord winner = MatchByBodyText(bodyPool, bodies, out best, out second, out bestMaxLen);
+                    if (winner != null && IsClearLocalBodyWinner(best, second, bestMaxLen))
+                    {
+                        return new SessionMatchResult
+                        {
+                            ThreadId = winner.Id,
+                            RolloutPath = winner.RolloutPath,
+                            ModelName = winner.Model,
+                            ReasoningEffort = winner.ReasoningEffort,
+                            Source = "本地+正文",
+                            Detail = string.Format("local-body pool={0} best={1} sec={2} maxLen={3}",
+                                bodyPoolCount, best, second, bestMaxLen)
+                        };
+                    }
+                }
+            }
+
             return new SessionMatchResult
             {
-                ThreadId = winner.Id,
-                RolloutPath = winner.RolloutPath,
-                ModelName = winner.Model,
-                ReasoningEffort = winner.ReasoningEffort,
-                Source = source
+                ThreadId = null,
+                RolloutPath = null,
+                Source = "待确认",
+                Detail = string.Format("local-miss cands={0} bodyPool={1} hdrHits={2} best={3} sec={4} hdrs=[{5}] bodies={6}",
+                    candidates.Count,
+                    bodyPoolCount,
+                    headerHits.Count,
+                    best,
+                    second,
+                    string.Join("|", headers.Take(4).Select(s => Truncate(s, 22)).ToArray()),
+                    bodies.Length)
             };
         }
 
-        private static List<StateThreadRecord> MatchByHeader(List<StateThreadRecord> candidates, string[] normHeaders, bool exactOnly = false)
+        private static List<StateThreadRecord> MatchByHeader(
+            List<StateThreadRecord> candidates,
+            string[] normHeaders,
+            bool exactOnly = false,
+            int minPrefixLen = 6)
         {
             var hits = new List<StateThreadRecord>();
             if (normHeaders == null || normHeaders.Length == 0) return hits;
@@ -276,10 +411,10 @@ namespace CodexInputUsage
                 for (int j = 0; j < normHeaders.Length; j++)
                 {
                     string h = normHeaders[j].TrimEnd('.', '\u2026', ' ');
-                    if (h.Length < 6) continue;
+                    if (h.Length < minPrefixLen) continue;
                     if ((nName.Length >= h.Length && nName.StartsWith(h, StringComparison.OrdinalIgnoreCase))
                         || (nTitle.Length >= h.Length && nTitle.StartsWith(h, StringComparison.OrdinalIgnoreCase))
-                        || (nName.Length >= 6 && h.StartsWith(nName, StringComparison.OrdinalIgnoreCase)))
+                        || (nName.Length >= minPrefixLen && h.StartsWith(nName, StringComparison.OrdinalIgnoreCase)))
                     {
                         prefixMatch = true;
                         break;
@@ -294,10 +429,12 @@ namespace CodexInputUsage
             List<StateThreadRecord> pool,
             string[] normBodies,
             out int bestScore,
-            out int secondScore)
+            out int secondScore,
+            out int bestMaxSnippetLen)
         {
             bestScore = 0;
             secondScore = 0;
+            bestMaxSnippetLen = 0;
             StateThreadRecord winner = null;
 
             for (int i = 0; i < pool.Count; i++)
@@ -305,11 +442,13 @@ namespace CodexInputUsage
                 var c = pool[i];
                 string corpus = GetNormalizedCorpus(c);
                 if (string.IsNullOrEmpty(corpus)) continue;
-                int score = CountSnippetHits(corpus, normBodies);
+                int maxLen;
+                int score = CountSnippetHits(corpus, normBodies, out maxLen);
                 if (score > bestScore)
                 {
                     secondScore = bestScore;
                     bestScore = score;
+                    bestMaxSnippetLen = maxLen;
                     winner = c;
                 }
                 else if (score > secondScore)
@@ -318,7 +457,7 @@ namespace CodexInputUsage
                 }
             }
 
-            return IsClearBodyWinner(bestScore, secondScore) ? winner : null;
+            return winner;
         }
 
         private static bool IsClearBodyWinner(int best, int second)
@@ -328,9 +467,17 @@ namespace CodexInputUsage
             return best >= 3 && best >= (second * 2);
         }
 
-        private static int CountSnippetHits(string normCorpus, string[] normBodies)
+        private static bool IsClearLocalBodyWinner(int best, int second, int bestMaxSnippetLen)
+        {
+            if (best <= 0) return false;
+            if (best >= 2 && (second == 0 || best >= (second * 3))) return true;
+            return best == 1 && second == 0 && bestMaxSnippetLen >= 28;
+        }
+
+        private static int CountSnippetHits(string normCorpus, string[] normBodies, out int maxMatchedLen)
         {
             int hits = 0;
+            maxMatchedLen = 0;
             for (int i = 0; i < normBodies.Length; i++)
             {
                 string s = normBodies[i];
@@ -338,7 +485,10 @@ namespace CodexInputUsage
                 // Take up to first 80 chars of snippet so formatting differences at end don't break substring match
                 string probe = s.Length > 80 ? s.Substring(0, 80) : s;
                 if (normCorpus.IndexOf(probe, StringComparison.OrdinalIgnoreCase) >= 0)
+                {
                     hits++;
+                    if (probe.Length > maxMatchedLen) maxMatchedLen = probe.Length;
+                }
             }
             return hits;
         }
@@ -367,24 +517,16 @@ namespace CodexInputUsage
                 if (!string.IsNullOrWhiteSpace(rec.Title)) sb.AppendLine(rec.Title);
                 if (!string.IsNullOrWhiteSpace(rec.FirstUserMessage)) sb.AppendLine(rec.FirstUserMessage);
 
-                // Read tail of rollout JSONL to collect recent user & assistant visible messages
+                // Read head (for long chats scrolled to top) + tail of rollout JSONL to collect visible messages
                 using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
                 {
-                    long start = Math.Max(0, fs.Length - TailCorpusBytes);
-                    fs.Seek(start, SeekOrigin.Begin);
-                    using (var sr = new StreamReader(fs, Encoding.UTF8, false, 32768))
+                    long len = fs.Length;
+                    if (len > TailCorpusBytes)
                     {
-                        if (start > 0) sr.ReadLine(); // skip partial first line
-                        string line;
-                        while ((line = sr.ReadLine()) != null)
-                        {
-                            if (line.IndexOf("\"last_agent_message\"", StringComparison.Ordinal) < 0
-                                && line.IndexOf("\"AgentMessage\"", StringComparison.Ordinal) < 0
-                                && line.IndexOf("\"UserMessage\"", StringComparison.Ordinal) < 0)
-                                continue;
-                            ExtractMessageTextFromLine(line, sb);
-                        }
+                        ScanRolloutRange(fs, 0, HeadCorpusBytes, sb);
                     }
+                    long tailStart = Math.Max(0, len - TailCorpusBytes);
+                    ScanRolloutRange(fs, tailStart, len - tailStart, sb);
                 }
 
                 string norm = NormalizeText(sb.ToString());
@@ -399,6 +541,33 @@ namespace CodexInputUsage
             catch
             {
                 return NormalizeText((rec.Name ?? string.Empty) + " " + (rec.Title ?? string.Empty));
+            }
+        }
+
+        private void ScanRolloutRange(FileStream fs, long startOffset, long maxBytes, StringBuilder sb)
+        {
+            if (maxBytes <= 0) return;
+            fs.Seek(startOffset, SeekOrigin.Begin);
+            using (var sr = new StreamReader(fs, Encoding.UTF8, false, 32768, true))
+            {
+                long readApprox = 0;
+                if (startOffset > 0)
+                {
+                    string skip = sr.ReadLine();
+                    if (skip != null) readApprox += skip.Length + 1;
+                }
+                string line;
+                while ((line = sr.ReadLine()) != null)
+                {
+                    readApprox += line.Length + 1;
+                    if (line.IndexOf("\"last_agent_message\"", StringComparison.Ordinal) >= 0
+                        || line.IndexOf("\"AgentMessage\"", StringComparison.Ordinal) >= 0
+                        || line.IndexOf("\"UserMessage\"", StringComparison.Ordinal) >= 0)
+                    {
+                        ExtractMessageTextFromLine(line, sb);
+                    }
+                    if (readApprox >= maxBytes) break;
+                }
             }
         }
 

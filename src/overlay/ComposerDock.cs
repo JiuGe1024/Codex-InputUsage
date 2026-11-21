@@ -635,18 +635,24 @@ namespace CodexInputUsage
 
                 var cache = new CacheRequest();
                 cache.Add(AutomationElement.NameProperty);
+                cache.Add(AutomationElement.ControlTypeProperty);
                 cache.Add(AutomationElement.BoundingRectangleProperty);
                 cache.Add(AutomationElement.IsOffscreenProperty);
                 cache.TreeScope = TreeScope.Element;
 
                 var cond = new OrCondition(
                     new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Text),
-                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Header));
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Header),
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button),
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit));
 
-                // Chat header sits in the top title bar (y <= winTop + 72), strictly above the sidebar thread list;
-                // allow left-aligned titles on wide/maximized windows while skipping top-left window chrome.
-                int headerMinX = Math.Max(winRect.Left + 160, Math.Min(composerRect.Left - 180, winRect.Left + 260));
-                int headerMaxY = winRect.Top + 72;
+                // Chat header sits in the top title bar (y <= winTop + 88), strictly above the sidebar thread list.
+                // Estimate main pane left edge from composer symmetry so both sidebar-open and collapsed layouts work.
+                int mainPaneLeft = Math.Max(winRect.Left, (composerRect.Left + composerRect.Right) - winRect.Right);
+                int headerMinX = mainPaneLeft > winRect.Left + 140
+                    ? Math.Max(winRect.Left + 180, mainPaneLeft - 24)
+                    : (winRect.Left + 60);
+                int headerMaxY = winRect.Top + 88;
                 int bodyMinX = composerRect.Left - 80;
                 int bodyMaxX = composerRect.Right + 80;
                 int bodyMinY = winRect.Top + 70;
@@ -674,6 +680,7 @@ namespace CodexInputUsage
                             int top = (int)Math.Round(b.Y);
                             int right = left + (int)Math.Round(b.Width);
                             int bottom = top + (int)Math.Round(b.Height);
+                            var ct = info.ControlType;
 
                             if (top >= winRect.Top && bottom <= headerMaxY && left >= headerMinX)
                             {
@@ -681,7 +688,8 @@ namespace CodexInputUsage
                                 if (trimmed.Length >= 3)
                                     headers.Add(Tuple.Create(left, trimmed));
                             }
-                            else if (top >= bodyMinY && bottom <= bodyMaxY && left >= bodyMinX && right <= bodyMaxX)
+                            else if ((ct == ControlType.Text || ct == ControlType.Header)
+                                && top >= bodyMinY && bottom <= bodyMaxY && left >= bodyMinX && right <= bodyMaxX)
                             {
                                 string trimmed = name.Trim();
                                 if (trimmed.Length >= 12)

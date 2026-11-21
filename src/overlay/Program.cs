@@ -216,16 +216,35 @@ namespace CodexInputUsage
                 var mDisc = matcher.Resolve(mockIpc.GetStatus(), new string[0], new string[0]);
                 bool okDisc = mDisc.ThreadId == null && mDisc.Source == "IPC 断线";
 
-                sb.AppendLine(string.Format("match_tests pool={0} header={1} bodyTieBreak={2} refuseAmbig={3} disconnectClear={4}",
-                    okPool, okHeader, okBody, okAmbig, okDisc));
+                // Local matching (used when Codex 26.1117+ removes \\.\pipe\codex-ipc):
+                // 1) truncated title prefix match, 2) body match beyond top-12, 3) single long unique snippet, 4) refuse ambiguous
+                var mLocHdr = matcher.ResolveLocalFromCandidatesForTest(cands, corpus, new string[] { "修复反重力代理…" }, new string[0]);
+                bool okLocHdr = mLocHdr.ThreadId == "thread-b" && mLocHdr.Source == "本地+标题";
+
+                var mLocSingle = matcher.ResolveLocalFromCandidatesForTest(cands, corpus, new string[0],
+                    new string[] { "这是第一段 68.6M 会话的独有正文内容，用于精确区分同名对话。" });
+                bool okLocSingle = mLocSingle.ThreadId == "thread-a" && mLocSingle.Source == "本地+正文";
+
+                var mLocAmbig = matcher.ResolveLocalFromCandidatesForTest(cands, corpus, new string[] { "阅读工作区交接文档" }, new string[0]);
+                bool okLocAmbig = mLocAmbig.ThreadId == null && mLocAmbig.Source == "待确认";
+
+                sb.AppendLine(string.Format("match_tests pool={0} header={1} bodyTieBreak={2} refuseAmbig={3} disconnectClear={4} localHdr={5} localSingle={6} localRefuseAmbig={7}",
+                    okPool, okHeader, okBody, okAmbig, okDisc, okLocHdr, okLocSingle, okLocAmbig));
             }
 
-            // 2. Test live Codex IPC pipe (2.2s window)
+            // 1b. Verify state_5.sqlite subagent filtering (Guardian review must never crowd out real threads)
+            var realThreads = CodexStateDb.TryReadRecentThreads(0);
+            int guardianCount = realThreads.Count(t => string.Equals(t.Name, "Guardian review", StringComparison.OrdinalIgnoreCase));
+            int existingRolloutCount = realThreads.Count(t => !string.IsNullOrWhiteSpace(t.RolloutPath) && File.Exists(t.RolloutPath));
+            sb.AppendLine(string.Format("db_real_threads total={0} guardianLeaked={1} withRollout={2}",
+                realThreads.Count, guardianCount, existingRolloutCount));
+
+            // 2. Test live Codex IPC pipe (1.2s window — optional on Codex 26.1117+)
             IpcRouteStatus liveIpc;
             using (var ipc = new CodexIpcMonitor())
             {
                 ipc.Start();
-                DateTime deadline = DateTime.UtcNow.AddMilliseconds(2200);
+                DateTime deadline = DateTime.UtcNow.AddMilliseconds(1200);
                 while (DateTime.UtcNow < deadline)
                 {
                     var st = ipc.GetStatus();
@@ -244,7 +263,7 @@ namespace CodexInputUsage
                 string.Join(",", liveIpc.FollowedThreadIds.Select(id => MetricFormatter.ShortThreadId(id)).ToArray()),
                 liveIpc.LastError ?? ""));
 
-            // 3. Cross-check a specific thread (prefer 01a1b9da if present, else explicit or first followed)
+            // 3. Cross-check a specific thread (prefer 01a1b9da if present, else first followed or first real thread with rollout)
             string testThread = null;
             for (int i = 0; i < liveIpc.FollowedThreadIds.Length; i++)
             {
@@ -256,6 +275,17 @@ namespace CodexInputUsage
             }
             if (testThread == null && liveIpc.FollowedThreadIds.Length > 0)
                 testThread = liveIpc.FollowedThreadIds[0];
+            if (testThread == null)
+            {
+                for (int i = 0; i < realThreads.Count; i++)
+                {
+                    if (!string.IsNullOrWhiteSpace(realThreads[i].RolloutPath) && File.Exists(realThreads[i].RolloutPath))
+                    {
+                        testThread = realThreads[i].Id;
+                        break;
+                    }
+                }
+            }
 
             string targetRollout = explicitRolloutPath;
             string effectiveThread = string.IsNullOrWhiteSpace(explicitRolloutPath) ? testThread : null;
@@ -263,7 +293,7 @@ namespace CodexInputUsage
                 targetRollout = CodexStateDb.FindRolloutFileByThreadId(testThread);
 
             var tracker = new RolloutSessionTracker();
-            tracker.UpdateFromDisk(effectiveThread, "IPC+标题", targetRollout);
+            tracker.UpdateFromDisk(effectiveThread, liveIpc.IsConnected ? "IPC+标题" : "本地+标题", targetRollout);
             var snap = tracker.BuildSnapshot();
             var quotaReader = new AccountQuotaReader();
             var liveQuota = quotaReader.GetLatestQuota(true);

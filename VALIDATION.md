@@ -6,17 +6,17 @@
 
 ### 1. 构建与零警告检查
 - 命令：`powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/Build-OverlayPrototype.ps1`
-- 结果：退出码 0，0 错误 0 警告，产物 `outputs/Codex-InputUsage-Overlay.exe`（138,240 字节）。
+- 结果：退出码 0，0 错误 0 警告，产物 `outputs/Codex-InputUsage-Overlay.exe`（144,384 字节）。
 
 ### 2. 路由与零猜测会话匹配（`--self-test`）
-- 单测结果：`match_tests pool=True header=True bodyTieBreak=True refuseAmbig=True disconnectClear=True`
+- 单测结果：`match_tests pool=True header=True bodyTieBreak=True refuseAmbig=True disconnectClear=True localHdr=True localSingle=True localRefuseAmbig=True`
   - 多活跃流同窗订阅池（3 候选）保留完整不覆盖；
   - 标题唯一匹配锁定正确会话（`IPC+标题`）；
   - 同名对话通过可见正文唯一消歧（`IPC+正文`）；
   - 多候选且前台无法唯一确认时拒绝猜测并清空（`待确认`）；
-  - IPC 断线立即清空旧值显示 `--`（`IPC 断线`）。
-- 实机现场日志（`work/overlay-diag.log`）：9 个同时活跃流下通过 `IPC+正文`（`bodyScore=4, second=0`）正确锁定当前前台对话。
-
+  - IPC 断线且无前台 UIA 证据时立即清空旧值显示 `--`（`IPC 断线`）；
+  - Codex `26.1117+` 无 `\\.\pipe\codex-ipc` 场景：`localHdr=True`（截断标题前缀匹配）、`localSingle=True`（单段长独有正文匹配）、`localRefuseAmbig=True`（同名无正文拒绝猜测）。
+- 实机数据库过滤验证：`db_real_threads total=92 guardianLeaked=0 withRollout=19`（原 519 条 `Guardian review` 等子代理记录已完全剔除，不再挤占真实对话候选池）。
 - 实机进程认证回归验证：当官方 Store 版 Codex 以非 AppModel 方式启动（`GetApplicationUserModelId` 返回 `15703` / `APPMODEL_ERROR_NO_APPLICATION`）时，通过 `QueryFullProcessImageName` 核验 `Program Files\WindowsApps\OpenAI.Codex_*__2p2nqsd0c76g0\app\ChatGPT.exe` 成功识别（`codexRunning=True`）。
 
 ### 3. 数据口径核对（对比原版 TokenBar 与 SQLite）

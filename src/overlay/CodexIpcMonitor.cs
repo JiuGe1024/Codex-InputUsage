@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.IO.Pipes;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -24,6 +25,10 @@ namespace CodexInputUsage
         private const int MaxWireFrameBytes = 256 * 1024 * 1024;
         private const int MaxJsonFrameBytes = 4 * 1024 * 1024;
         private const string SourceClientId = "codex-inputusage";
+        private const string PipePath = @"\\.\pipe\codex-ipc";
+
+        [DllImport("kernel32.dll", EntryPoint = "WaitNamedPipeW", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool WaitNamedPipe(string name, uint timeoutMs);
 
         private sealed class FollowedEntry
         {
@@ -121,16 +126,28 @@ namespace CodexInputUsage
 
         private async Task RunAsync(CancellationToken token)
         {
-            int retryMs = 350;
+            int retryMs = 500;
             while (!token.IsCancellationRequested)
             {
+                bool pipeReady = false;
+                try { pipeReady = WaitNamedPipe(PipePath, 1); } catch { }
+
+                if (!pipeReady)
+                {
+                    MarkDisconnected("pipe-not-found");
+                    try { await Task.Delay(retryMs, token).ConfigureAwait(false); }
+                    catch (OperationCanceledException) { break; }
+                    retryMs = Math.Min(15000, retryMs * 2);
+                    continue;
+                }
+
                 try
                 {
                     using (var pipe = new NamedPipeClientStream(".", "codex-ipc", PipeDirection.InOut, PipeOptions.Asynchronous))
                     {
-                        await ConnectWithCancelAsync(pipe, 2500, token).ConfigureAwait(false);
+                        await ConnectWithCancelAsync(pipe, 1500, token).ConfigureAwait(false);
                         MarkConnected();
-                        retryMs = 350;
+                        retryMs = 500;
                         await SendInitializeAsync(pipe, token).ConfigureAwait(false);
 
                         byte[] prefix = new byte[4];
@@ -162,7 +179,7 @@ namespace CodexInputUsage
                 MarkDisconnected(null);
                 try { await Task.Delay(retryMs, token).ConfigureAwait(false); }
                 catch (OperationCanceledException) { break; }
-                retryMs = Math.Min(5000, retryMs * 2);
+                retryMs = Math.Min(15000, retryMs * 2);
             }
         }
 
@@ -298,16 +315,18 @@ namespace CodexInputUsage
 
         private void MarkDisconnected(string error)
         {
+            bool changed;
             lock (_sync)
             {
+                changed = _isConnected || _followed.Count > 0 || _cachedThreadIds.Length > 0;
                 _isConnected = false;
                 if (!string.IsNullOrWhiteSpace(error)) _lastError = error;
                 _followed.Clear();
                 _cachedThreadIds = new string[0];
                 _lastFollowedThreadId = null;
-                _version++;
+                if (changed) _version++;
             }
-            NotifyUpdated();
+            if (changed) NotifyUpdated();
         }
 
         private void RebuildSnapshotLocked()
