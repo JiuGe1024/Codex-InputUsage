@@ -9,7 +9,7 @@
 | 模块 | 职责 |
 |---|---|
 | `src/overlay/CodexIpcMonitor.cs` | 只读连接 `\\.\pipe\codex-ipc`（4 字节 LE 帧 + UTF-8 JSON），维护完整活跃订阅池（按 `(sourceClientId, hostId, conversationId)` 去重），并在路由变更时即时触发回调 |
-| `src/overlay/SessionMatcher.cs` | 严格零猜测会话消歧：结合 IPC 订阅池与前台 Codex 窗口 UIA 标题栏/可见正文，按 `IPC+标题 -> IPC+正文 -> 单一 IPC` 顺序锁定；断线或多候选无法唯一确认时立即清空旧值显示 `--` |
+| `src/overlay/SessionMatcher.cs` | 优先使用 IPC 订阅池与前台 UIA 标题或正文；IPC 不可用时匹配本地会话的唯一精确标题或至少两段可见正文。仅有正文时最多检查最近 12 个会话。证据不足时显示 `--` |
 | `src/overlay/CodexStateDb.cs` | 通过系统内置 `winsqlite3.dll` 只读查询 `~/.codex/state_5.sqlite`，精确主键查 `rollout_path` / `name` / `title` / `model` / `reasoning_effort`，不做最近聊天猜测 |
 | `src/overlay/AccountQuotaReader.cs` | 扫描本机最近写入的 Codex rollout 尾部，提取账号级实时 `rate_limits`（5h / 周额度 + `resets_at` + `credits`），确保查看旧对话时也显示此刻实时余额与重置倒计时 |
 | `src/overlay/RolloutMetrics.cs` | 增量字节偏移解析 rollout JSONL：去重统计每轮与会话累计 Token、缓存命中率、会话加权均速（Avg TPS）；TPS 分母采用 `整轮耗时 - (工具区间并集 - 与模型重叠)`；解析 `world_state`/`response_item`/`additional_tools`/`compacted` 生成十通道上下文拆分并按 Hamilton 最大余数法等比缩放至官方 `ContextUsedTokens` |

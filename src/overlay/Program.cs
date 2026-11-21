@@ -211,9 +211,9 @@ namespace CodexInputUsage
                 var mAmbig = matcher.ResolveFromCandidatesForTest(cands, corpus, new string[] { "无关按钮" }, new string[0]);
                 bool okAmbig = mAmbig.ThreadId == null && mAmbig.Source == "待确认";
 
-                // IPC disconnect -> MUST clear immediately
+                // IPC disconnect without foreground evidence clears the existing binding.
                 mockIpc.SimulateDisconnectForTest();
-                var mDisc = matcher.Resolve(mockIpc.GetStatus(), new string[] { "修复反重力代理访问" }, new string[0]);
+                var mDisc = matcher.Resolve(mockIpc.GetStatus(), new string[0], new string[0]);
                 bool okDisc = mDisc.ThreadId == null && mDisc.Source == "IPC 断线";
 
                 sb.AppendLine(string.Format("match_tests pool={0} header={1} bodyTieBreak={2} refuseAmbig={3} disconnectClear={4}",

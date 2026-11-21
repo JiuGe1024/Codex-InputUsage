@@ -42,6 +42,8 @@ namespace CodexInputUsage
         {
             if (ipc == null || !ipc.IsConnected)
             {
+                var localMatch = ResolveLocal(headerTexts, bodyTexts);
+                if (localMatch != null) return localMatch;
                 return new SessionMatchResult
                 {
                     Source = "IPC 断线",
@@ -199,7 +201,46 @@ namespace CodexInputUsage
             return list;
         }
 
-        private static List<StateThreadRecord> MatchByHeader(List<StateThreadRecord> candidates, string[] normHeaders)
+        private SessionMatchResult ResolveLocal(string[] headerTexts, string[] bodyTexts)
+        {
+            var headers = NormalizeSnippets(headerTexts, 3, 160);
+            var bodies = NormalizeSnippets(bodyTexts, 12, 220)
+                .Where(s => s.Length >= 24)
+                .Select(s => s.Length > 80 ? s.Substring(0, 80) : s)
+                .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            if (headers.Length == 0 && bodies.Length < 2) return null;
+
+            RefreshSessionIndexIfNeeded();
+            var candidates = CodexStateDb.TryReadRecentThreads(headers.Length == 0 ? 12 : 0);
+            foreach (var candidate in candidates)
+            {
+                string name;
+                if (string.IsNullOrWhiteSpace(candidate.Name) && _sessionIndexNames.TryGetValue(candidate.Id, out name))
+                    candidate.Name = name;
+            }
+            var hits = MatchByHeader(candidates, headers, true);
+            StateThreadRecord winner = hits.Count == 1 ? hits[0] : null;
+            string source = "本地+标题";
+            if (winner == null && bodies.Length >= 2)
+            {
+                if (hits.Count == 0) hits = candidates.Take(12).ToList();
+                int best, second;
+                winner = MatchByBodyText(hits.FindAll(c => File.Exists(c.RolloutPath)), bodies, out best, out second);
+                if (best < 2 || second != 0) winner = null;
+                source = "本地+正文";
+            }
+            if (winner == null || !File.Exists(winner.RolloutPath)) return null;
+            return new SessionMatchResult
+            {
+                ThreadId = winner.Id,
+                RolloutPath = winner.RolloutPath,
+                ModelName = winner.Model,
+                ReasoningEffort = winner.ReasoningEffort,
+                Source = source
+            };
+        }
+
+        private static List<StateThreadRecord> MatchByHeader(List<StateThreadRecord> candidates, string[] normHeaders, bool exactOnly = false)
         {
             var hits = new List<StateThreadRecord>();
             if (normHeaders == null || normHeaders.Length == 0) return hits;
@@ -223,7 +264,7 @@ namespace CodexInputUsage
                 }
                 if (exact) hits.Add(c);
             }
-            if (hits.Count > 0) return hits;
+            if (exactOnly || hits.Count > 0) return hits;
 
             // Pass 2: Truncated header prefix match (Codex truncates long titles with "…" or "...")
             for (int i = 0; i < candidates.Count; i++)

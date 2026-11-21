@@ -68,10 +68,10 @@ namespace CodexInputUsage
 
         internal static List<StateThreadRecord> TryReadRecentThreads(int limit)
         {
-            if (limit <= 0) limit = 30;
+            string limitClause = limit > 0 ? " LIMIT " + limit : string.Empty;
             return QueryRows(
                 ResolveDatabasePath(),
-                "SELECT " + ThreadColumns + " FROM threads WHERE archived = 0 ORDER BY recency_at_ms DESC LIMIT " + limit,
+                "SELECT " + ThreadColumns + " FROM threads WHERE archived = 0 ORDER BY recency_at_ms DESC" + limitClause,
                 null);
         }
 
