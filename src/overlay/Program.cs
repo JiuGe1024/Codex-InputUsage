@@ -328,6 +328,33 @@ namespace CodexInputUsage
             for (int i = 0; i < variants.Length; i++)
                 sb.AppendLine("strip" + i + "=" + variants[i].Describe());
 
+            // 4. Verify StripSlotPreferences persistence + guard + custom strip rendering
+            string workDir = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, @"..\work"));
+            Directory.CreateDirectory(workDir);
+            string tmpSettings = Path.Combine(workDir, "selftest-settings.tmp.json");
+            var testPrefs = new StripSlotPreferences { ShowTps = false, ShowLatestTurn = true, ShowSessionTotal = true, ShowCache = true, ShowQuota5h = true };
+            bool savedOk = OverlaySettingsStore.SaveToPath(tmpSettings, testPrefs);
+            var loadedPrefs = OverlaySettingsStore.LoadFromPath(tmpSettings);
+            try { if (File.Exists(tmpSettings)) File.Delete(tmpSettings); } catch { }
+            bool roundTripOk = savedOk && !loadedPrefs.ShowTps && loadedPrefs.ShowQuota5h && loadedPrefs.ShowCache;
+            var onlyOne = new StripSlotPreferences { ShowTps = false, ShowLatestTurn = false, ShowSessionTotal = false, ShowCache = false, ShowQuota5h = true };
+            bool guardOk = !onlyOne.Toggle("quota5h") && onlyOne.ShowQuota5h;
+            var quota5hPrefs = new StripSlotPreferences { ShowQuota5h = true };
+            var quota5hVars = StripRenderModel.BuildVariants(snap, quota5hPrefs);
+            var customVars = StripRenderModel.BuildVariants(snap, loadedPrefs);
+            sb.AppendLine(string.Format("settings_test roundTrip={0} guardLastSlot={1} quota5hStrip=\"{2}\" noTpsStrip=\"{3}\"",
+                roundTripOk, guardOk,
+                quota5hVars.Length > 0 ? quota5hVars[0].Describe() : "",
+                customVars.Length > 0 ? customVars[0].Describe() : ""));
+
+            // 5. Verify Today & 7-Day History aggregation directly from state_5.sqlite
+            var histReader = new HistoryStatsReader();
+            var hist = histReader.GetSnapshot(true);
+            sb.AppendLine(string.Format("history todayTok={0} todayThreads={1} weekTok={2} weekThreads={3} avgDaily={4} allTok={5} allThreads={6} models7d={7} top7d={8}",
+                hist.TodayTokens, hist.TodayThreads, hist.SevenDayTokens, hist.SevenDayThreads,
+                hist.SevenDayAvgDailyTokens, hist.AllTimeTokens, hist.AllTimeThreads,
+                hist.Models7d.Count, hist.TopThreads7d.Count));
+
             if (snap.ContextChannels != null && snap.ContextChannels.Count > 0)
             {
                 long chSum = 0;
@@ -340,8 +367,6 @@ namespace CodexInputUsage
                 sb.AppendLine("ctx_channels sum=" + chSum + " (official=" + snap.ContextUsedTokens + ") | " + string.Join(", ", chParts.ToArray()));
             }
 
-            string workDir = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, @"..\work"));
-            Directory.CreateDirectory(workDir);
             using (var bmp = StripForm.RenderPreviewBitmap(variants[0], ThemePalette.Light, false, true))
             {
                 bmp.Save(Path.Combine(workDir, "preview-strip-light.png"), ImageFormat.Png);
@@ -352,12 +377,24 @@ namespace CodexInputUsage
                 bmp.Save(Path.Combine(workDir, "preview-strip-compact-light.png"), ImageFormat.Png);
                 sb.AppendLine("strip1_px=" + bmp.Width + "x" + bmp.Height);
             }
+            if (quota5hVars.Length > 0)
+            {
+                using (var bmp = StripForm.RenderPreviewBitmap(quota5hVars[0], ThemePalette.Light, false, true))
+                {
+                    bmp.Save(Path.Combine(workDir, "preview-strip-quota5h-light.png"), ImageFormat.Png);
+                    sb.AppendLine("strip_quota5h_px=" + bmp.Width + "x" + bmp.Height);
+                }
+            }
             using (var bmp = StripForm.RenderPreviewBitmap(variants[0], ThemePalette.Dark, false, true))
                 bmp.Save(Path.Combine(workDir, "preview-strip-dark.png"), ImageFormat.Png);
             using (var bmp = DetailPopoverForm.RenderPreviewBitmap(snap, ThemePalette.Light))
                 bmp.Save(Path.Combine(workDir, "preview-detail-light.png"), ImageFormat.Png);
             using (var bmp = DetailPopoverForm.RenderPreviewBitmap(snap, ThemePalette.Dark))
                 bmp.Save(Path.Combine(workDir, "preview-detail-dark.png"), ImageFormat.Png);
+            using (var bmp = DetailPopoverForm.RenderHistoryPreviewBitmap(snap, hist, ThemePalette.Light))
+                bmp.Save(Path.Combine(workDir, "preview-detail-history-light.png"), ImageFormat.Png);
+            using (var bmp = DetailPopoverForm.RenderHistoryPreviewBitmap(snap, hist, ThemePalette.Dark))
+                bmp.Save(Path.Combine(workDir, "preview-detail-history-dark.png"), ImageFormat.Png);
 
             File.WriteAllText(Path.Combine(workDir, "selftest-report.txt"), sb.ToString(), Encoding.UTF8);
         }
@@ -467,6 +504,8 @@ namespace CodexInputUsage
             private readonly CodexIpcMonitor _ipc = new CodexIpcMonitor();
             private readonly SessionMatcher _matcher = new SessionMatcher();
             private readonly AccountQuotaReader _quotaReader = new AccountQuotaReader();
+            private readonly HistoryStatsReader _historyReader = new HistoryStatsReader();
+            private readonly StripSlotPreferences _slotPrefs = OverlaySettingsStore.Load();
             private readonly RolloutSessionTracker _rollout = new RolloutSessionTracker();
             private readonly ComposerDockTracker _dockTracker;
             private readonly StripForm _strip = new StripForm();
@@ -474,6 +513,11 @@ namespace CodexInputUsage
             private readonly NotifyIcon _trayIcon;
             private readonly ToolStripMenuItem _trayStatusItem;
             private readonly ToolStripMenuItem _trayAutoStartItem;
+            private readonly ToolStripMenuItem _traySlotTps;
+            private readonly ToolStripMenuItem _traySlotTurn;
+            private readonly ToolStripMenuItem _traySlotTotal;
+            private readonly ToolStripMenuItem _traySlotCache;
+            private readonly ToolStripMenuItem _traySlotQuota5h;
             private readonly System.Windows.Forms.Timer _uiTimer;
 
             private FileSystemWatcher _rolloutWatcher;
@@ -506,8 +550,13 @@ namespace CodexInputUsage
                 _uiContext = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
                 _dockTracker = new ComposerDockTracker(delegate { return _activeCodexHwnd; });
                 _strip.StripClicked += OnStripClicked;
+                _strip.SlotToggleRequested += OnSlotToggleRequested;
                 _strip.AutoStartToggled += OnAutoStartToggled;
                 _strip.ExitRequested += delegate { ExitThread(); };
+                _popover.HistoryTabActivated += delegate
+                {
+                    _popover.UpdateHistoryData(_historyReader.GetSnapshot(true));
+                };
                 _popover.VisibleChanged += delegate
                 {
                     if (!_popover.Visible)
@@ -533,10 +582,25 @@ namespace CodexInputUsage
 
                 var trayMenu = new ContextMenuStrip();
                 _trayStatusItem = new ToolStripMenuItem("状态：等待原生 Codex 启动") { Enabled = false };
+                var traySlotsMenu = new ToolStripMenuItem("状态条显示项");
+                _traySlotTps = CreateTraySlotItem("输出速度 (TPS)", "tps");
+                _traySlotTurn = CreateTraySlotItem("本轮 Token", "turn");
+                _traySlotTotal = CreateTraySlotItem("会话累计", "total");
+                _traySlotCache = CreateTraySlotItem("缓存命中率", "cache");
+                _traySlotQuota5h = CreateTraySlotItem("5h 配额余量", "quota5h");
+                traySlotsMenu.DropDownItems.Add(_traySlotTps);
+                traySlotsMenu.DropDownItems.Add(_traySlotTurn);
+                traySlotsMenu.DropDownItems.Add(_traySlotTotal);
+                traySlotsMenu.DropDownItems.Add(_traySlotCache);
+                traySlotsMenu.DropDownItems.Add(_traySlotQuota5h);
+                traySlotsMenu.DropDownItems.Add(new ToolStripSeparator());
+                traySlotsMenu.DropDownItems.Add("恢复默认显示", null, delegate { OnSlotToggleRequested("reset"); });
+
                 _trayAutoStartItem = new ToolStripMenuItem("跟随原生 Codex 自动启动") { CheckOnClick = false };
                 _trayAutoStartItem.Click += OnAutoStartToggled;
                 trayMenu.Items.Add(_trayStatusItem);
                 trayMenu.Items.Add(new ToolStripSeparator());
+                trayMenu.Items.Add(traySlotsMenu);
                 trayMenu.Items.Add(_trayAutoStartItem);
                 trayMenu.Items.Add("退出 Codex InputUsage", null, delegate { ExitThread(); });
 
@@ -549,6 +613,7 @@ namespace CodexInputUsage
                 };
 
                 SyncAutoStartMenuState();
+                SyncSlotMenuState();
                 _dockTracker.Start();
 
                 _uiTimer = new System.Windows.Forms.Timer { Interval = ActivePollMs };
@@ -658,6 +723,32 @@ namespace CodexInputUsage
                 catch { }
             }
 
+            private ToolStripMenuItem CreateTraySlotItem(string label, string key)
+            {
+                var item = new ToolStripMenuItem(label) { CheckOnClick = false };
+                item.Click += delegate { OnSlotToggleRequested(key); };
+                return item;
+            }
+
+            private void SyncSlotMenuState()
+            {
+                _strip.SetSlotPreferences(_slotPrefs);
+                if (_traySlotTps != null) _traySlotTps.Checked = _slotPrefs.ShowTps;
+                if (_traySlotTurn != null) _traySlotTurn.Checked = _slotPrefs.ShowLatestTurn;
+                if (_traySlotTotal != null) _traySlotTotal.Checked = _slotPrefs.ShowSessionTotal;
+                if (_traySlotCache != null) _traySlotCache.Checked = _slotPrefs.ShowCache;
+                if (_traySlotQuota5h != null) _traySlotQuota5h.Checked = _slotPrefs.ShowQuota5h;
+            }
+
+            private void OnSlotToggleRequested(string slotKey)
+            {
+                if (!_slotPrefs.Toggle(slotKey)) return;
+                OverlaySettingsStore.Save(_slotPrefs);
+                SyncSlotMenuState();
+                Program.LogDiag("strip slots updated -> " + _slotPrefs.Signature());
+                SyncNow(false);
+            }
+
             private void SyncAutoStartMenuState()
             {
                 bool enabled = CodexCompanionManager.IsEnabled();
@@ -680,6 +771,8 @@ namespace CodexInputUsage
                 if (_popoverWanted && !_lastStripBounds.IsEmpty)
                 {
                     ThemePalette pal = ThemePalette.For(CodexThemeSource.Current);
+                    if (_popover.ActiveTab == PopoverTab.History)
+                        _popover.UpdateHistoryData(_historyReader.GetSnapshot(true));
                     _popover.UpdateData(_lastMetrics, pal, _lastStripBounds);
                     if (!_popover.Visible) _popover.Show();
                     _popover.PositionAbove(_lastStripBounds);
@@ -849,12 +942,16 @@ namespace CodexInputUsage
                         AccountQuotaReader.ApplyToSnapshot(nextMetrics, liveQuota);
                         _lastMetrics = nextMetrics;
                     }
+                    else if (_slotPrefs.ShowQuota5h && liveQuota != null)
+                    {
+                        AccountQuotaReader.ApplyToSnapshot(_lastMetrics, liveQuota);
+                    }
                 }
 
                 ThemePalette pal = ThemePalette.For(CodexThemeSource.Current);
                 Rectangle placed;
                 string variant;
-                bool shown = _strip.ApplyDockedState(effectiveDock, _lastMetrics, pal, out placed, out variant);
+                bool shown = _strip.ApplyDockedState(effectiveDock, _lastMetrics, _slotPrefs, pal, out placed, out variant);
                 if (!shown)
                 {
                     LogState("dock-no-space:" + effectiveDock.Detail);
@@ -872,6 +969,8 @@ namespace CodexInputUsage
 
                 if (_popoverWanted)
                 {
+                    if (_popover.ActiveTab == PopoverTab.History)
+                        _popover.UpdateHistoryData(_historyReader.GetSnapshot(false));
                     _popover.UpdateData(_lastMetrics, pal, placed);
                     if (!_popover.Visible) _popover.Show();
                 }

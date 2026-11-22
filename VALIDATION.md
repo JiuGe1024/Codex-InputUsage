@@ -1,12 +1,12 @@
 # Codex InputUsage 验证记录
 
-更新于 2026-11-21。
+更新于 2026-11-22。
 
 ## 已实测通过
 
 ### 1. 构建与零警告检查
 - 命令：`powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/Build-OverlayPrototype.ps1`
-- 结果：退出码 0，0 错误 0 警告，产物 `outputs/Codex-InputUsage-Overlay.exe`（144,384 字节）。
+- 结果：退出码 0，0 错误 0 警告，产物 `outputs/Codex-InputUsage-Overlay.exe`（169,984 字节）。
 
 ### 2. 路由与零猜测会话匹配（`--self-test`）
 - 单测结果：`match_tests pool=True header=True bodyTieBreak=True refuseAmbig=True disconnectClear=True localHdr=True localSingle=True localRefuseAmbig=True`
@@ -32,11 +32,16 @@
 - 执行 `scripts/Install-AutoStart.ps1`：已移除遗留 `HKCU\...\Run\CodexInputUsageOverlay`，写入 `~/.codex/config.toml` 的 `[mcp_servers.codex_input_usage]`。
 - 执行 `node scripts/codex-mcp-companion.mjs` 握手测试：`initialize` 正常响应，`tools/list` 返回 `{"tools":[]}`，退出码 0。
 
-### 5. 视觉与排版核对
+### 5. 历史汇总与常驻条自定义槽位（`--self-test` + 实机验收）
+- 历史汇总直读 SQLite（`HistoryStatsReader`）：`history todayTok=0 todayThreads=0 weekTok=248072443 weekThreads=13 avgDaily=35438920 allTok=2474582286 allThreads=92 models7d=2 top7d=5`（基于 `state_5.sqlite` 毫秒级聚合，已剔除子代理线程；今日 0 消耗空状态显示正常）。
+- 常驻条槽位持久化与防空保护（`OverlaySettingsStore`）：`settings_test roundTrip=True guardLastSlot=True`；开启 `5h 配额余量` 胶囊渲染 `strip_quota5h_px=384x24`，窄窗自动降档生效。
+- 离屏预览核对：`work/preview-detail-history-light.png`、`work/preview-detail-history-dark.png`、`work/preview-strip-quota5h-light.png` 明暗双主题排版清晰无截断。
+
+### 6. 视觉与排版核对
 - 离屏渲染预览（`work/preview-strip-light.png`、`work/preview-strip-dark.png`、`work/preview-detail-light.png`、`work/preview-detail-dark.png`）已逐张目视核对：
   - 常驻条完整档 `328×24px`（实机工具栏可用空位实测 `349px`），矢量琥珀金闪电、整数缓存柔色微胶囊、明暗主题均清晰无截断；
-  - 详情面板标题栏模型徽标 + 钉住按钮、2×2 卡片（含均速与两位小数缓存率）、独立双列实时额度卡、十通道分段条与 2×5 清单、带拖拽滚动条及底部精确明细条的逐轮表排版对齐正常。
-- 用户实机交互验收：此前版本已由用户确认原生启动、停靠外观、对话切换、TPS 速度、本轮缓存率、十通道上下文与响应优化整体满意。
+  - 详情面板标题栏模型徽标 + 钉住按钮、顶部「当前会话 / 今日与 7 日汇总」双 Tab、2×2 卡片（含均速与两位小数缓存率）、独立双列实时额度卡、十通道分段条与 2×5 清单、带拖拽滚动条及底部精确明细条的逐轮表排版对齐正常。
+- 用户实机交互验收：用户已确认原生启动、停靠外观、对话切换、TPS 速度、本轮缓存率、十通道上下文、响应优化，以及新增的「今日与 7 日汇总」Tab 与常驻条右键显示项微调均体验正常。
 
 ## 未在本终端执行的验证边界
-- 受限于代理终端隔离桌面 `exebox-...`，本次新增的点击面板外部 / `Esc` 自动收起、钉住开关与滚动条拖拽交互，以及高 DPI 多屏缩放尚未在真实交互桌面实测。
+- 受限于代理终端隔离桌面 `exebox-...`，高 DPI 多屏缩放尚未在终端自动化复测；交互类功能均由用户在真实交互桌面完成验收。

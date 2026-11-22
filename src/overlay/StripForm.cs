@@ -1,8 +1,10 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Drawing.Text;
+using System.Globalization;
 using System.Windows.Forms;
 
 namespace CodexInputUsage
@@ -10,22 +12,42 @@ namespace CodexInputUsage
     internal sealed class StripRenderModel
     {
         internal string PrefixText;      // e.g. "⚡ 47 tok/s · 本轮 811.8K · 累计 68.6M · 缓存"
+        internal bool HasCachePill;
         internal string TurnCacheText;   // e.g. "99%" (null if single-cache fallback)
         internal MetricTier TurnCacheTier;
         internal string SessionCacheText;// e.g. "97%"
         internal MetricTier SessionCacheTier;
         internal bool CompactSlash;      // true => "99%/97%", false => "99% / 97%"
+        internal string QuotaPillText;   // e.g. "5h 87%" (null if hidden)
+        internal MetricTier QuotaPillTier;
 
         internal string Describe()
         {
-            if (string.IsNullOrEmpty(TurnCacheText))
-                return PrefixText + " [" + SessionCacheText + "]";
-            string sep = CompactSlash ? "/" : " / ";
-            return PrefixText + " [" + TurnCacheText + sep + SessionCacheText + "]";
+            var parts = new List<string>();
+            if (!string.IsNullOrEmpty(PrefixText))
+                parts.Add(PrefixText);
+            if (HasCachePill)
+            {
+                if (string.IsNullOrEmpty(TurnCacheText))
+                    parts.Add("[" + (SessionCacheText ?? "--") + "]");
+                else
+                    parts.Add("[" + TurnCacheText + (CompactSlash ? "/" : " / ") + (SessionCacheText ?? "--") + "]");
+            }
+            if (!string.IsNullOrEmpty(QuotaPillText))
+                parts.Add("[" + QuotaPillText + "]");
+            return string.Join(" ", parts.ToArray());
         }
 
         internal static StripRenderModel[] BuildVariants(SessionMetricsSnapshot snap)
         {
+            return BuildVariants(snap, null);
+        }
+
+        internal static StripRenderModel[] BuildVariants(SessionMetricsSnapshot snap, StripSlotPreferences prefs)
+        {
+            var p = prefs ?? new StripSlotPreferences();
+            if (!p.AnyEnabled()) p = new StripSlotPreferences();
+
             string tps = snap != null ? MetricFormatter.FormatTps(snap.DisplayTps, snap.TpsIsHeld) : "--";
             bool hasTurn = snap != null && snap.LatestTurn != null && snap.LatestTurn.TotalTokens > 0;
             string turn = hasTurn ? MetricFormatter.CompactTokens(snap.LatestTurn.TotalTokens) : "--";
@@ -39,56 +61,105 @@ namespace CodexInputUsage
             string sessCache = hasSess ? MetricFormatter.FormatCacheCompact(sessCacheVal) : "--";
             MetricTier sessTier = MetricFormatter.ClassifyCache(sessCacheVal);
 
-            return new StripRenderModel[]
+            string quota5hText = null;
+            MetricTier quota5hTier = MetricTier.Muted;
+            if (p.ShowQuota5h)
             {
-                // Level 0: Full sleek strip — proper "缓存" label + semantic dual pill [99% / 97%]
-                new StripRenderModel
+                if (snap != null && snap.PrimaryUsedPct.HasValue)
                 {
-                    PrefixText = string.Format("\u26A1 {0} tok/s \u00B7 \u672C\u8F6E {1} \u00B7 \u7D2F\u8BA1 {2} \u00B7 \u7F13\u5B58", tps, turn, total),
-                    TurnCacheText = turnCache, TurnCacheTier = turnTier,
-                    SessionCacheText = sessCache, SessionCacheTier = sessTier,
-                    CompactSlash = false
-                },
-                // Level 1: Compact speed unit + tighter slash inside pill
-                new StripRenderModel
-                {
-                    PrefixText = string.Format("\u26A1 {0}/s \u00B7 \u672C\u8F6E {1} \u00B7 \u7D2F\u8BA1 {2} \u00B7 \u7F13\u5B58", tps, turn, total),
-                    TurnCacheText = turnCache, TurnCacheTier = turnTier,
-                    SessionCacheText = sessCache, SessionCacheTier = sessTier,
-                    CompactSlash = true
-                },
-                // Level 2: Drop "缓存" word, keep pill directly after dot
-                new StripRenderModel
-                {
-                    PrefixText = string.Format("\u26A1 {0}/s \u00B7 \u672C\u8F6E {1} \u00B7 \u7D2F\u8BA1 {2} \u00B7", tps, turn, total),
-                    TurnCacheText = turnCache, TurnCacheTier = turnTier,
-                    SessionCacheText = sessCache, SessionCacheTier = sessTier,
-                    CompactSlash = true
-                },
-                // Level 3: Drop TPS, preserve 本轮 + 累计 + 缓存 pill
-                new StripRenderModel
-                {
-                    PrefixText = string.Format("\u672C\u8F6E {0} \u00B7 \u7D2F\u8BA1 {1} \u00B7 \u7F13\u5B58", turn, total),
-                    TurnCacheText = turnCache, TurnCacheTier = turnTier,
-                    SessionCacheText = sessCache, SessionCacheTier = sessTier,
-                    CompactSlash = true
-                },
-                // Level 4: Very narrow
-                new StripRenderModel
-                {
-                    PrefixText = string.Format("{0} / {1} \u00B7", turn, total),
-                    TurnCacheText = turnCache, TurnCacheTier = turnTier,
-                    SessionCacheText = sessCache, SessionCacheTier = sessTier,
-                    CompactSlash = true
-                },
-                // Level 5: Extreme narrow fallback
-                new StripRenderModel
-                {
-                    PrefixText = total + " \u00B7",
-                    TurnCacheText = null, TurnCacheTier = MetricTier.Muted,
-                    SessionCacheText = sessCache, SessionCacheTier = sessTier,
-                    CompactSlash = true
+                    double rem = Math.Max(0.0, Math.Min(100.0, 100.0 - snap.PrimaryUsedPct.Value));
+                    quota5hText = string.Format(CultureInfo.InvariantCulture, "5h {0}%", (int)Math.Round(rem));
+                    quota5hTier = MetricFormatter.ClassifyQuotaRemaining(rem);
                 }
+                else
+                {
+                    quota5hText = "5h --";
+                    quota5hTier = MetricTier.Muted;
+                }
+            }
+
+            var raw = new List<StripRenderModel>
+            {
+                // Level 0: Full sleek strip respecting user slot toggles
+                BuildOne(p.ShowTps, false, p.ShowLatestTurn, p.ShowSessionTotal, false, p.ShowCache, true, true, false, p.ShowQuota5h,
+                    tps, turn, total, turnCache, turnTier, sessCache, sessTier, quota5hText, quota5hTier),
+                // Level 1: Compact TPS unit + tighter slash inside cache pill
+                BuildOne(p.ShowTps, true, p.ShowLatestTurn, p.ShowSessionTotal, false, p.ShowCache, true, true, true, p.ShowQuota5h,
+                    tps, turn, total, turnCache, turnTier, sessCache, sessTier, quota5hText, quota5hTier),
+                // Level 2: Drop "缓存" word, keep pill directly after dot
+                BuildOne(p.ShowTps, true, p.ShowLatestTurn, p.ShowSessionTotal, false, p.ShowCache, false, true, true, p.ShowQuota5h,
+                    tps, turn, total, turnCache, turnTier, sessCache, sessTier, quota5hText, quota5hTier),
+                // Level 3: Drop TPS if other slots exist, keep 本轮 + 累计 + 缓存 + 5h
+                BuildOne(p.ShowTps && !p.ShowLatestTurn && !p.ShowSessionTotal && !p.ShowCache && !p.ShowQuota5h, true,
+                    p.ShowLatestTurn, p.ShowSessionTotal, false, p.ShowCache, !p.ShowQuota5h, true, true, p.ShowQuota5h,
+                    tps, turn, total, turnCache, turnTier, sessCache, sessTier, quota5hText, quota5hTier),
+                // Level 4: Very narrow — compact token labels "3.3M / 9.9M"
+                BuildOne(p.ShowTps && !p.ShowLatestTurn && !p.ShowSessionTotal && !p.ShowCache && !p.ShowQuota5h, true,
+                    p.ShowLatestTurn, p.ShowSessionTotal, true, p.ShowCache, false, true, true, p.ShowQuota5h,
+                    tps, turn, total, turnCache, turnTier, sessCache, sessTier, quota5hText, quota5hTier),
+                // Level 5: Extreme narrow fallback
+                BuildOne(p.ShowTps && !p.ShowLatestTurn && !p.ShowSessionTotal && !p.ShowCache && !p.ShowQuota5h, true,
+                    p.ShowLatestTurn && !p.ShowSessionTotal, p.ShowSessionTotal, true, p.ShowCache, false, false, true, p.ShowQuota5h,
+                    tps, turn, total, turnCache, turnTier, sessCache, sessTier, quota5hText, quota5hTier)
+            };
+
+            var unique = new List<StripRenderModel>(raw.Count);
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            for (int i = 0; i < raw.Count; i++)
+            {
+                string key = raw[i].Describe();
+                if (string.IsNullOrWhiteSpace(key)) continue;
+                if (seen.Add(key)) unique.Add(raw[i]);
+            }
+            return unique.ToArray();
+        }
+
+        private static StripRenderModel BuildOne(
+            bool showTps, bool compactTps,
+            bool showTurn, bool showTotal, bool compactTokenLabels,
+            bool showCache, bool showCacheLabel, bool dualCache, bool compactSlash,
+            bool showQuota5h,
+            string tps, string turn, string total,
+            string turnCache, MetricTier turnTier,
+            string sessCache, MetricTier sessTier,
+            string quota5hText, MetricTier quota5hTier)
+        {
+            var segments = new List<string>();
+            if (showTps)
+                segments.Add(compactTps ? ("\u26A1 " + tps + "/s") : ("\u26A1 " + tps + " tok/s"));
+
+            if (compactTokenLabels)
+            {
+                if (showTurn && showTotal) segments.Add(turn + " / " + total);
+                else if (showTurn) segments.Add(turn);
+                else if (showTotal) segments.Add(total);
+            }
+            else
+            {
+                if (showTurn) segments.Add("\u672C\u8F6E " + turn);
+                if (showTotal) segments.Add("\u7D2F\u8BA1 " + total);
+            }
+
+            string prefix = string.Join(" \u00B7 ", segments.ToArray());
+            if (showCache)
+            {
+                if (showCacheLabel)
+                    prefix = prefix.Length > 0 ? (prefix + " \u00B7 \u7F13\u5B58") : "\u7F13\u5B58";
+                else if (prefix.Length > 0)
+                    prefix = prefix + " \u00B7";
+            }
+
+            return new StripRenderModel
+            {
+                PrefixText = prefix,
+                HasCachePill = showCache,
+                TurnCacheText = (showCache && dualCache) ? turnCache : null,
+                TurnCacheTier = (showCache && dualCache) ? turnTier : MetricTier.Muted,
+                SessionCacheText = showCache ? sessCache : null,
+                SessionCacheTier = showCache ? sessTier : MetricTier.Muted,
+                CompactSlash = compactSlash,
+                QuotaPillText = showQuota5h ? quota5hText : null,
+                QuotaPillTier = showQuota5h ? quota5hTier : MetricTier.Muted
             };
         }
     }
@@ -116,8 +187,14 @@ namespace CodexInputUsage
         private bool _allowShow;
         private Rectangle _targetBounds = Rectangle.Empty;
         private ToolStripMenuItem _autoStartItem;
+        private ToolStripMenuItem _slotTpsItem;
+        private ToolStripMenuItem _slotTurnItem;
+        private ToolStripMenuItem _slotTotalItem;
+        private ToolStripMenuItem _slotCacheItem;
+        private ToolStripMenuItem _slotQuota5hItem;
 
         internal event EventHandler StripClicked;
+        internal event Action<string> SlotToggleRequested;
         internal event EventHandler AutoStartToggled;
         internal event EventHandler ExitRequested;
 
@@ -135,6 +212,25 @@ namespace CodexInputUsage
             {
                 if (StripClicked != null) StripClicked(this, EventArgs.Empty);
             });
+
+            var slotsMenu = new ToolStripMenuItem("状态条显示项");
+            _slotTpsItem = CreateSlotMenuItem("输出速度 (TPS)", "tps");
+            _slotTurnItem = CreateSlotMenuItem("本轮 Token", "turn");
+            _slotTotalItem = CreateSlotMenuItem("会话累计", "total");
+            _slotCacheItem = CreateSlotMenuItem("缓存命中率", "cache");
+            _slotQuota5hItem = CreateSlotMenuItem("5h 配额余量", "quota5h");
+            slotsMenu.DropDownItems.Add(_slotTpsItem);
+            slotsMenu.DropDownItems.Add(_slotTurnItem);
+            slotsMenu.DropDownItems.Add(_slotTotalItem);
+            slotsMenu.DropDownItems.Add(_slotCacheItem);
+            slotsMenu.DropDownItems.Add(_slotQuota5hItem);
+            slotsMenu.DropDownItems.Add(new ToolStripSeparator());
+            slotsMenu.DropDownItems.Add("恢复默认显示", null, delegate
+            {
+                if (SlotToggleRequested != null) SlotToggleRequested("reset");
+            });
+            menu.Items.Add(slotsMenu);
+
             _autoStartItem = new ToolStripMenuItem("跟随原生 Codex 自动启动") { CheckOnClick = false };
             _autoStartItem.Click += delegate
             {
@@ -147,6 +243,26 @@ namespace CodexInputUsage
                 if (ExitRequested != null) ExitRequested(this, EventArgs.Empty);
             });
             ContextMenuStrip = menu;
+        }
+
+        private ToolStripMenuItem CreateSlotMenuItem(string label, string key)
+        {
+            var item = new ToolStripMenuItem(label) { CheckOnClick = false };
+            item.Click += delegate
+            {
+                if (SlotToggleRequested != null) SlotToggleRequested(key);
+            };
+            return item;
+        }
+
+        internal void SetSlotPreferences(StripSlotPreferences prefs)
+        {
+            if (prefs == null) return;
+            if (_slotTpsItem != null) _slotTpsItem.Checked = prefs.ShowTps;
+            if (_slotTurnItem != null) _slotTurnItem.Checked = prefs.ShowLatestTurn;
+            if (_slotTotalItem != null) _slotTotalItem.Checked = prefs.ShowSessionTotal;
+            if (_slotCacheItem != null) _slotCacheItem.Checked = prefs.ShowCache;
+            if (_slotQuota5hItem != null) _slotQuota5hItem.Checked = prefs.ShowQuota5h;
         }
 
         internal void SetAutoStartChecked(bool enabled)
@@ -224,6 +340,7 @@ namespace CodexInputUsage
         internal bool ApplyDockedState(
             ComposerDockSnapshot dock,
             SessionMetricsSnapshot metrics,
+            StripSlotPreferences slotPrefs,
             ThemePalette palette,
             out Rectangle placedBounds,
             out string chosenVariant)
@@ -237,7 +354,7 @@ namespace CodexInputUsage
                 return false;
             }
 
-            StripRenderModel[] variants = StripRenderModel.BuildVariants(metrics);
+            StripRenderModel[] variants = StripRenderModel.BuildVariants(metrics, slotPrefs);
             int rightEdge;
             if (dock.Source == DockSourceKind.UiaContext)
                 rightEdge = dock.ReferenceRect.Left - 10;
@@ -248,7 +365,7 @@ namespace CodexInputUsage
 
             int minLeft = Math.Max(dock.ComposerRect.Left + 10, dock.LeftBarrierX + 10);
             int maxWidth = rightEdge - minLeft;
-            if (maxWidth < 70)
+            if (maxWidth < 50)
             {
                 HideStrip();
                 return false;
@@ -281,7 +398,7 @@ namespace CodexInputUsage
             if (x < work.Left) x = work.Left;
 
             Rectangle nextBounds = new Rectangle(x, y, selectedWidth, StripHeightPx);
-            string nextKey = selected.Describe() + "|" + (int)selected.TurnCacheTier + "|" + (int)selected.SessionCacheTier;
+            string nextKey = selected.Describe() + "|" + (int)selected.TurnCacheTier + "|" + (int)selected.SessionCacheTier + "|" + (int)selected.QuotaPillTier;
             bool needRepaint = !string.Equals(_modelKey, nextKey, StringComparison.Ordinal)
                 || _palette != palette
                 || _targetBounds.Size != nextBounds.Size
@@ -429,6 +546,7 @@ namespace CodexInputUsage
                 float x = PaddingXPx;
 
                 string body = model.PrefixText ?? string.Empty;
+                bool hasPrefix = body.Length > 0;
                 if (body.StartsWith("\u26A1 ", StringComparison.Ordinal))
                 {
                     // Crisp vector lightning bolt in warm amber-gold so it stands out cleanly
@@ -440,77 +558,110 @@ namespace CodexInputUsage
                     body = body.Substring(2);
                 }
 
-                string sep = " \u00B7 ";
-                string[] parts = body.Split(new string[] { sep }, StringSplitOptions.None);
-                SizeF sampleSz = g.MeasureString("Ag", textFont, 1000, fmt);
-                float textY = (size.Height - sampleSz.Height) / 2f;
-
-                for (int i = 0; i < parts.Length; i++)
+                if (body.Length > 0)
                 {
-                    if (i > 0)
+                    string sep = " \u00B7 ";
+                    string[] parts = body.Split(new string[] { sep }, StringSplitOptions.None);
+                    SizeF sampleSz = g.MeasureString("Ag", textFont, 1000, fmt);
+                    float textY = (size.Height - sampleSz.Height) / 2f;
+
+                    for (int i = 0; i < parts.Length; i++)
                     {
-                        g.DrawString(sep, textFont, mutedBrush, x, textY, fmt);
-                        x += g.MeasureString(sep, textFont, 1000, fmt).Width;
+                        if (i > 0)
+                        {
+                            g.DrawString(sep, textFont, mutedBrush, x, textY, fmt);
+                            x += g.MeasureString(sep, textFont, 1000, fmt).Width;
+                        }
+                        g.DrawString(parts[i], textFont, mainBrush, x, textY, fmt);
+                        x += g.MeasureString(parts[i], textFont, 1000, fmt).Width;
                     }
-                    g.DrawString(parts[i], textFont, mainBrush, x, textY, fmt);
-                    x += g.MeasureString(parts[i], textFont, 1000, fmt).Width;
                 }
 
-                // Sleek semantic-tinted cache badge pill: [99% / 97%]
-                x += PillGapPx;
-                string slash = model.CompactSlash ? "/" : " / ";
-                float innerW = 0f;
-                float turnW = 0f;
-                float slashW = 0f;
-                float sessW = g.MeasureString(model.SessionCacheText ?? "--", pillFont, 1000, fmt).Width;
-                if (!string.IsNullOrEmpty(model.TurnCacheText))
-                {
-                    turnW = g.MeasureString(model.TurnCacheText, pillFont, 1000, fmt).Width;
-                    slashW = g.MeasureString(slash, textFont, 1000, fmt).Width;
-                    innerW = turnW + slashW + sessW;
-                }
-                else
-                {
-                    innerW = sessW;
-                }
-
-                int pillW = (int)Math.Ceiling(innerW) + (PillPadXPx * 2);
                 int pillY = (size.Height - PillHeightPx) / 2;
-                var pillRect = new Rectangle((int)Math.Round(x), pillY, pillW, PillHeightPx);
-
-                // Tint badge by primary displayed cache tier (turn tier if present, else session tier)
-                MetricTier badgeTier = !string.IsNullOrEmpty(model.TurnCacheText) && model.TurnCacheTier != MetricTier.Muted
-                    ? model.TurnCacheTier
-                    : model.SessionCacheTier;
-                Color badgeAccent = badgeTier == MetricTier.Muted ? palette.StripTextSecondary : palette.ForTier(badgeTier);
                 int fillAlpha = palette.Kind == CodexThemeKind.Dark ? 34 : 24;
                 int borderAlpha = palette.Kind == CodexThemeKind.Dark ? 78 : 62;
-
-                using (var pillPath = CreateRoundedPath(pillRect, 5))
-                using (var pillFill = new SolidBrush(Color.FromArgb(fillAlpha, badgeAccent)))
-                using (var pillBorder = new Pen(Color.FromArgb(borderAlpha, badgeAccent), 1f))
-                {
-                    g.FillPath(pillFill, pillPath);
-                    g.DrawPath(pillBorder, pillPath);
-                }
-
                 SizeF pillSample = g.MeasureString("99%", pillFont, 1000, fmt);
-                float px = pillRect.X + PillPadXPx;
-                float py = pillRect.Y + (PillHeightPx - pillSample.Height) / 2f;
+                bool drewPrev = hasPrefix;
 
-                if (!string.IsNullOrEmpty(model.TurnCacheText))
+                // Optional semantic-tinted cache badge pill: [99% / 97%]
+                if (model.HasCachePill)
                 {
-                    Color tCol = model.TurnCacheTier == MetricTier.Muted ? palette.StripTextSecondary : palette.ForTier(model.TurnCacheTier);
-                    using (var tb = new SolidBrush(tCol))
-                        g.DrawString(model.TurnCacheText, pillFont, tb, px, py, fmt);
-                    px += turnW;
-                    g.DrawString(slash, textFont, mutedBrush, px, py - 0.5f, fmt);
-                    px += slashW;
+                    if (drewPrev) x += PillGapPx;
+                    string slash = model.CompactSlash ? "/" : " / ";
+                    float turnW = 0f;
+                    float slashW = 0f;
+                    float sessW = g.MeasureString(model.SessionCacheText ?? "--", pillFont, 1000, fmt).Width;
+                    float innerW;
+                    if (!string.IsNullOrEmpty(model.TurnCacheText))
+                    {
+                        turnW = g.MeasureString(model.TurnCacheText, pillFont, 1000, fmt).Width;
+                        slashW = g.MeasureString(slash, textFont, 1000, fmt).Width;
+                        innerW = turnW + slashW + sessW;
+                    }
+                    else
+                    {
+                        innerW = sessW;
+                    }
+
+                    int pillW = (int)Math.Ceiling(innerW) + (PillPadXPx * 2);
+                    var pillRect = new Rectangle((int)Math.Round(x), pillY, pillW, PillHeightPx);
+
+                    MetricTier badgeTier = !string.IsNullOrEmpty(model.TurnCacheText) && model.TurnCacheTier != MetricTier.Muted
+                        ? model.TurnCacheTier
+                        : model.SessionCacheTier;
+                    Color badgeAccent = badgeTier == MetricTier.Muted ? palette.StripTextSecondary : palette.ForTier(badgeTier);
+
+                    using (var pillPath = CreateRoundedPath(pillRect, 5))
+                    using (var pillFill = new SolidBrush(Color.FromArgb(fillAlpha, badgeAccent)))
+                    using (var pillBorder = new Pen(Color.FromArgb(borderAlpha, badgeAccent), 1f))
+                    {
+                        g.FillPath(pillFill, pillPath);
+                        g.DrawPath(pillBorder, pillPath);
+                    }
+
+                    float px = pillRect.X + PillPadXPx;
+                    float py = pillRect.Y + (PillHeightPx - pillSample.Height) / 2f;
+
+                    if (!string.IsNullOrEmpty(model.TurnCacheText))
+                    {
+                        Color tCol = model.TurnCacheTier == MetricTier.Muted ? palette.StripTextSecondary : palette.ForTier(model.TurnCacheTier);
+                        using (var tb = new SolidBrush(tCol))
+                            g.DrawString(model.TurnCacheText, pillFont, tb, px, py, fmt);
+                        px += turnW;
+                        g.DrawString(slash, textFont, mutedBrush, px, py - 0.5f, fmt);
+                        px += slashW;
+                    }
+
+                    Color sCol = model.SessionCacheTier == MetricTier.Muted ? palette.StripTextSecondary : palette.ForTier(model.SessionCacheTier);
+                    using (var sb = new SolidBrush(sCol))
+                        g.DrawString(model.SessionCacheText ?? "--", pillFont, sb, px, py, fmt);
+
+                    x = pillRect.Right;
+                    drewPrev = true;
                 }
 
-                Color sCol = model.SessionCacheTier == MetricTier.Muted ? palette.StripTextSecondary : palette.ForTier(model.SessionCacheTier);
-                using (var sb = new SolidBrush(sCol))
-                    g.DrawString(model.SessionCacheText ?? "--", pillFont, sb, px, py, fmt);
+                // Optional semantic-tinted 5h quota pill: [5h 87%]
+                if (!string.IsNullOrEmpty(model.QuotaPillText))
+                {
+                    if (drewPrev) x += PillGapPx;
+                    float qW = g.MeasureString(model.QuotaPillText, pillFont, 1000, fmt).Width;
+                    int pillW = (int)Math.Ceiling(qW) + (PillPadXPx * 2);
+                    var pillRect = new Rectangle((int)Math.Round(x), pillY, pillW, PillHeightPx);
+                    Color qAccent = model.QuotaPillTier == MetricTier.Muted ? palette.StripTextSecondary : palette.ForTier(model.QuotaPillTier);
+
+                    using (var pillPath = CreateRoundedPath(pillRect, 5))
+                    using (var pillFill = new SolidBrush(Color.FromArgb(fillAlpha, qAccent)))
+                    using (var pillBorder = new Pen(Color.FromArgb(borderAlpha, qAccent), 1f))
+                    {
+                        g.FillPath(pillFill, pillPath);
+                        g.DrawPath(pillBorder, pillPath);
+                    }
+
+                    float px = pillRect.X + PillPadXPx;
+                    float py = pillRect.Y + (PillHeightPx - pillSample.Height) / 2f;
+                    using (var qb = new SolidBrush(qAccent))
+                        g.DrawString(model.QuotaPillText, pillFont, qb, px, py, fmt);
+                }
             }
         }
 
@@ -543,22 +694,37 @@ namespace CodexInputUsage
 
                 float width = PaddingXPx;
                 string body = model.PrefixText ?? string.Empty;
+                bool hasPrev = body.Length > 0;
                 if (body.StartsWith("\u26A1 ", StringComparison.Ordinal))
                 {
                     width += BoltSlotPx;
                     body = body.Substring(2);
                 }
-                width += g.MeasureString(body, textFont, 1000, fmt).Width;
-                width += PillGapPx;
+                if (body.Length > 0)
+                    width += g.MeasureString(body, textFont, 1000, fmt).Width;
 
-                string slash = model.CompactSlash ? "/" : " / ";
-                float innerW = g.MeasureString(model.SessionCacheText ?? "--", pillFont, 1000, fmt).Width;
-                if (!string.IsNullOrEmpty(model.TurnCacheText))
+                if (model.HasCachePill)
                 {
-                    innerW += g.MeasureString(model.TurnCacheText, pillFont, 1000, fmt).Width;
-                    innerW += g.MeasureString(slash, textFont, 1000, fmt).Width;
+                    if (hasPrev) width += PillGapPx;
+                    string slash = model.CompactSlash ? "/" : " / ";
+                    float innerW = g.MeasureString(model.SessionCacheText ?? "--", pillFont, 1000, fmt).Width;
+                    if (!string.IsNullOrEmpty(model.TurnCacheText))
+                    {
+                        innerW += g.MeasureString(model.TurnCacheText, pillFont, 1000, fmt).Width;
+                        innerW += g.MeasureString(slash, textFont, 1000, fmt).Width;
+                    }
+                    width += (float)Math.Ceiling(innerW) + (PillPadXPx * 2);
+                    hasPrev = true;
                 }
-                width += (float)Math.Ceiling(innerW) + (PillPadXPx * 2) + PaddingXPx + 2f;
+
+                if (!string.IsNullOrEmpty(model.QuotaPillText))
+                {
+                    if (hasPrev) width += PillGapPx;
+                    float qW = g.MeasureString(model.QuotaPillText, pillFont, 1000, fmt).Width;
+                    width += (float)Math.Ceiling(qW) + (PillPadXPx * 2);
+                }
+
+                width += PaddingXPx + 2f;
                 return (int)Math.Ceiling(width);
             }
         }
