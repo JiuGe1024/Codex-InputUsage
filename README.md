@@ -1,26 +1,70 @@
 # Codex InputUsage
 
-独立的 Windows Codex 用量插件。输入框下方显示最近完成一轮的 Token、会话累计 Token 和累计缓存率。点击用量胶囊，向上展开最近一轮的输入、输出、缓存命中、平均速度及扣除工具后的时长。逐轮表格列出当前会话各已完成轮次的 Token 消耗和缓存率。缺少可核对的数据时显示 `--`。
+面向 Windows 原生 Microsoft Store 版 Codex Desktop 的轻量伴随用量监控浮层（**无 CDP、零外部依赖、单个 170 KB 可执行文件**）。直接从原生图标启动 Codex，浮层自动随行停靠在输入框工具栏，提供实时速度、Token、缓存命中率、额度余量、十通道上下文拆分、逐轮明细及近 7 日历史汇总。
 
-## 启动
+## 核心特性
 
-需要 Microsoft Store 版 Codex 和 Node.js 22 或更新版本。从构建产物双击 `outputs/Codex-InputUsage.exe`。保留项目目录结构。若 Codex 已通过官方入口运行，请先正常退出一次。
+- **输入框工具栏无缝停靠**：通过 Windows UI Automation 定位 Codex 输入框底栏（Context 圆环左侧），以 `UpdateLayeredWindow` 32 位预乘 Alpha 透明层渲染，自动跟随 `~/.codex/config.toml` 明暗主题；通过进程外 Win32 `SetWinEventHook` 实现切窗 `<1ms` 隐藏/恢复与窗口拖动 60 FPS 零重绘跟随。
+- **常驻状态条与右键槽位自定义**：默认展示 `⚡ tok/s · 本轮 · 累计 · 缓存 [本轮% / 累计%]`（多档窄窗自适应），支持在状态条或托盘右键菜单独立开关显示项（输出速度、本轮 Token、会话累计、缓存命中率、可选 `5h 配额余量` 微胶囊），偏好持久化至 `%LOCALAPPDATA%\CodexInputUsage\settings.json`。
+- **零猜测会话绑定**：优先结合本机 IPC（若当前 Codex 版本开启）；针对 Codex `26.1117+` 移除 `\\.\pipe\codex-ipc` 的情况，自动过滤 `state_5.sqlite` 内部子代理线程并对本机全部真实会话做唯一标题或可见正文精确匹配，证据不足时拒绝猜测并显示 `--`。
+- **三页签详情监控卡片**（左键点击常驻条展开/收起，支持点击外部/`Esc` 自动收起与标题栏「钉住」开关）：
+  - **当前会话**：输出速度与会话平均速度并列卡、本轮/累计缓存命中率（两位小数）、最近一轮与会话累计卡、账号级实时 5h / 周额度余量与重置倒计时卡、十通道上下文窗口拆分（按 Hamilton 最大余数法精确对齐官方值）。
+  - **逐轮明细**：独立表格页展示每轮模型、速度、首字延迟、上下文 / 思考 / 正文分解、Token 消耗与缓存率，支持滚轮与可视拖拽滚动条及底部精确明细条。
+  - **今日与 7 日汇总**：直读 `state_5.sqlite` 毫秒级聚合今日与近 7 日消耗、可悬停/点击查精确值的 7 日柱状趋势图、按模型分布与近 7 日 Top 5 高消耗会话。
+- **原生无工具 MCP 伴随启动**：不写 Windows 开机自启注册表，通过 `~/.codex/config.toml` 的轻量无工具 stdio MCP 入口（`scripts/codex-mcp-companion.mjs`，`tools/list` 返回空数组、零上下文开销）在启动原生 Codex 时自动拉起浮层，Codex 退出 3 秒后自动退出。
 
-InputUsage 和原 TokenBar 各自使用独立源码、运行状态。两者共用单实例锁以避免同时挂载。切换时先退出 Codex，再打开想用的启动器。正常退出 Codex 后后台自动停止。
+## 快速开始
 
-## 构建
+### 1. 构建
 
-在项目目录运行 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/Build-InputUsage.ps1`。
+仅需 Windows 自带的 .NET Framework 4.x `csc.exe`，无需额外 SDK 或 NuGet 依赖：
 
-统计沿用经过校验的本机会话记录，连接仅使用验证过的本机回环调试端口。输入区节点结构不匹配或当前会话身份不明确时，组件会隐藏。只支持已能识别会话 ID 的 Codex 对话页面。
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/Build-OverlayPrototype.ps1
+```
 
-已验证当前 Codex 窗口的实际挂载和真实会话数据。浏览器预览覆盖了 320 px 宽度、鼠标开关和键盘 Enter、Esc。全新环境冷启动尚待实机确认。
+产物输出至 `outputs/Codex-InputUsage-Overlay.exe`。
 
-## 无 CDP 伴随浮层
+### 2. 注册随原生 Codex 自动启动
 
-运行 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/Build-OverlayPrototype.ps1` 构建，生成 `outputs/Codex-InputUsage-Overlay.exe`（源码位于 `src/overlay/`）。
+需要本机已安装 Node.js（用于运行无工具 MCP 伴随脚本）：
 
-- **工具栏无缝停靠**：通过 Windows UI Automation 识别官方 Microsoft Store 版 Codex 的输入框工具栏（Context 圆环左侧），使用 `UpdateLayeredWindow` 32 位透明文字绘制并跟随 `~/.codex/config.toml` 的明暗主题。常驻显示输出速度（扣除工具耗时）、最近一轮 Token、会话累计 Token 与缓存命中率，窗口变窄时自动降级简写以免遮挡按钮。
-- **会话绑定**：优先结合本机 IPC（若当前 Codex 版本提供）与前台窗口可见标题/正文定位当前会话；当新版 Codex（`26.1117+`）未开启 `codex-ipc` 管道时，自动过滤内部子代理线程并对全部本机真实会话做唯一标题或可见正文精确匹配，证据不足时显示 `--`。
-- **详情弹窗与逐轮明细**：左键点击状态条展开/收起详情卡片，显示输出速度、首字延迟、缓存命中率、最近一轮与会话累计、上下文进度条、5h/周配额余量及可滚轮翻页的逐轮明细。
-- **随原生 Codex 自动启动**：不写 Windows 开机自启注册表，通过 `~/.codex/config.toml` 的轻量无工具 MCP 伴随入口（`scripts/codex-mcp-companion.mjs`）随原生 Codex Desktop 自动拉起，Codex 退出后浮层自动退出。可在右键或托盘菜单切换“跟随原生 Codex 自动启动”，或运行 `scripts/Install-AutoStart.ps1` / `scripts/Uninstall-AutoStart.ps1`。
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/Install-AutoStart.ps1
+```
+
+卸载伴随启动（同时清理历史注册表项）：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/Uninstall-AutoStart.ps1
+```
+
+也可直接在常驻条或系统托盘右键菜单中切换“跟随原生 Codex 自动启动”。
+
+### 3. 离线自检与离屏预览
+
+```powershell
+.\outputs\Codex-InputUsage-Overlay.exe --self-test
+```
+
+自检报告与明暗双主题各页签预览图输出至 `work/`（不干扰正在运行的浮层实例）。
+
+## 目录结构
+
+```text
+src/overlay/                  # 伴随浮层全部 C# 源码（13 个模块）
+scripts/
+  Build-OverlayPrototype.ps1  # 零依赖 csc.exe 构建脚本
+  Install-AutoStart.ps1       # 注册 ~/.codex/config.toml 无工具 MCP 伴随入口
+  Uninstall-AutoStart.ps1     # 移除伴随入口
+  codex-mcp-companion.mjs     # 无工具 stdio MCP 伴随拉起脚本
+outputs/                      # 构建产物（Git 忽略）
+work/                         # 诊断日志、自检报告与离屏预览图（Git 忽略）
+legacy/cdp/                   # 早期 CDP 路线历史原型归档（仅作参考，不再维护）
+```
+
+## 项目文档
+
+- [STATE.md](STATE.md)：当前架构、模块职责与运行约束
+- [TASKS.md](TASKS.md)：迭代里程碑与任务清单
+- [VALIDATION.md](VALIDATION.md)：实测验证记录与验证边界

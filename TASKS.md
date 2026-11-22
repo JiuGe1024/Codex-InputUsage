@@ -1,6 +1,6 @@
 # Codex InputUsage 任务清单
 
-更新于 2026-11-21。
+更新于 2026-11-22。
 
 ## 已完成
 
@@ -17,9 +17,12 @@
 - [x] 详情面板交互打磨（点击外部 / `Esc` 自动收起、标题栏「钉住」开关、可视化拖拽滚动条、悬停/点击行精确明细条）
 - [x] 标题栏模型与推理档位徽标 + 速度卡会话均速（Avg TPS）
 - [x] 修复 Codex `26.1117+` 移除 `\\.\pipe\codex-ipc` 后的本地全会话匹配（SQLite 过滤 500+ `Guardian review` 子代理行、UIA 顶栏支持 `Button`/`Edit` 标题、放开本地全量 rollout 正文池与截断标题前缀匹配、静默退避 IPC 探测、修复详情页 `本地+标题`/`本地+正文` 绿色绑定徽标）— `d485f79`
-- [x] 面板顶部 Tab 切换：「当前会话」 / 「今日与 7 日汇总」（`HistoryStatsReader` 直读 `state_5.sqlite`，含今日/7 日双卡、交互式 7 日柱状图、按模型分布与 Top 5 会话）
-- [x] 常驻条显示项右键微调（`OverlaySettingsStore` 持久化至 `%LOCALAPPDATA%\CodexInputUsage\settings.json`，支持 TPS / 本轮 / 累计 / 缓存 / `5h 配额余量` 微胶囊独立开关与恢复默认）
+- [x] 面板顶部 Tab 切换：「当前会话」 / 「今日与 7 日汇总」（`HistoryStatsReader` 直读 `state_5.sqlite`，含今日/7 日双卡、交互式 7 日柱状图、按模型分布与 Top 5 会话）— `8801c99`
+- [x] 常驻条显示项右键微调（`OverlaySettingsStore` 持久化至 `%LOCALAPPDATA%\CodexInputUsage\settings.json`，支持 TPS / 本轮 / 累计 / 缓存 / `5h 配额余量` 微胶囊独立开关与恢复默认）— `8801c99`
+- [x] 拆分独立「逐轮明细」页签、补齐页签矢量图标、速度卡并列显示会话平均速度及逐轮上下文/思考/正文与 Token 消耗列 — `a84919c`、`1be0472`
+- [x] 仓库与文档整理：重写 `README.md` 聚焦无 CDP 伴随浮层、同步 `STATE.md`/`TASKS.md`、归档早期 CDP 原型至 `legacy/cdp/` 并清理过时 `HANDOFF.md`
 
-## 后续可选
+## 待推进（跨端交接至 Codex）
 
-- 暂无未完成必选任务，后续按实机体验反馈迭代。
+- [ ] 额度「已重置」显示口径统一修正（含常驻条 `[5h XX%]` 与详情页卡片）
+- [ ] 高 DPI 缩放适配（兼容 125% / 150% / 200% 屏幕且 96 DPI 零回归）
