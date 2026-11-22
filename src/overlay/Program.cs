@@ -434,8 +434,8 @@ namespace CodexInputUsage
                 var workArea = new Rectangle(-1920, 0, 1920, 1040);
                 var bottomAnchor = new Rectangle(-1880, 980, 300, 40);
                 var topAnchor = new Rectangle(-410, 10, 300, 40);
-                var bottomPopup = DetailPopoverForm.CalculateBounds(bottomAnchor, workArea, 680, scale);
-                var topPopup = DetailPopoverForm.CalculateBounds(topAnchor, workArea, 680, scale);
+                var bottomPopup = DetailPopoverForm.CalculateBounds(bottomAnchor, workArea, scale);
+                var topPopup = DetailPopoverForm.CalculateBounds(topAnchor, workArea, scale);
                 dpiBounds &= workArea.Contains(bottomPopup) && workArea.Contains(topPopup)
                     && bottomPopup.Bottom <= bottomAnchor.Top && topPopup.Top >= topAnchor.Bottom
                     && bottomPopup.Width == OverlayDpi.Pixels(540, scale);

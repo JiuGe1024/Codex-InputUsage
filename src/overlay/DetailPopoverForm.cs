@@ -32,18 +32,18 @@ namespace CodexInputUsage
         private const int VkEscape = 0x1B;
 
         private const int PopoverWidth = 540;
+        private const int PopoverHeight = 608;
         private const int CornerRadius = 12;
         private const int Pad = 14;
         private const int HeaderHeight = 38;
         private const int TabBarHeight = 34;
-        private const int CardGridHeight = 138;
-        private const int QuotaSectionHeight = 72;
-        private const int ContextBarHeight = 172;
+        private const int CardGridHeight = 126;
+        private const int QuotaSectionHeight = 62;
+        private const int ContextBarHeight = 140;
         private const int TableHeaderHeight = 44;
         private const int RowHeight = 24;
         private const int InspectorHeight = 28;
         private const int SessionVisibleRows = 5;
-        private const int DetailVisibleRows = 16;
 
         private const int HistSummaryHeight = 70;
         private const int HistChartHeight = 162;
@@ -265,18 +265,14 @@ namespace CodexInputUsage
             // Very narrow work areas may not fit a full-width panel at the host scale.
             float scale = Math.Min(_hostDpiScale, work.Width / (PopoverWidth + 16f));
             int rows = _snapshot.Turns != null ? _snapshot.Turns.Count : 0;
-            bool allTurns = _activeTab == PopoverTab.Turns;
-            int targetRows = Math.Max(1, Math.Min(allTurns ? DetailVisibleRows : SessionVisibleRows, rows));
-            int chromeHeight = TurnTableChromeHeight(_activeTab);
-            int desired = _activeTab == PopoverTab.History
+            Rectangle bounds = CalculateBounds(anchor, work, scale);
+            int logicalHeight = Math.Min(PopoverHeight, (int)Math.Floor((bounds.Height + 0.49f) / scale));
+            _visibleRows = VisibleTurnRows(_activeTab, rows, logicalHeight);
+            _scrollOffset = _activeTab == PopoverTab.Turns ? Math.Min(_scrollOffset, Math.Max(0, rows - _visibleRows)) : 0;
+            int contentHeight = _activeTab == PopoverTab.History
                 ? HistoryHeight(_history)
-                : chromeHeight + targetRows * RowHeight;
-            Rectangle bounds = CalculateBounds(anchor, work, desired, scale);
-            int logicalHeight = Math.Min(desired, (int)Math.Floor((bounds.Height + 0.49f) / scale));
-
-            _visibleRows = allTurns ? Math.Max(1, Math.Min(targetRows, (logicalHeight - chromeHeight) / RowHeight)) : targetRows;
-            _scrollOffset = allTurns ? Math.Min(_scrollOffset, Math.Max(0, rows - _visibleRows)) : 0;
-            _maxBodyScroll = allTurns ? 0 : Math.Max(0, desired - logicalHeight);
+                : TurnTableChromeHeight(_activeTab) + _visibleRows * RowHeight;
+            _maxBodyScroll = Math.Max(0, contentHeight - logicalHeight);
             _bodyScroll = Math.Min(_bodyScroll, _maxBodyScroll);
 
             bool changedLayout = _dpiScale != scale || _logicalHeight != logicalHeight;
@@ -306,14 +302,14 @@ namespace CodexInputUsage
             if (changedLayout) Invalidate();
         }
 
-        internal static Rectangle CalculateBounds(Rectangle anchor, Rectangle work, int desiredHeight, float scale)
+        internal static Rectangle CalculateBounds(Rectangle anchor, Rectangle work, float scale)
         {
             int gap = Math.Min(OverlayDpi.Pixels(8, scale), (work.Height - 1) / 2);
             int width = Math.Min(work.Width, OverlayDpi.Pixels(PopoverWidth, scale));
             int maxHeight = work.Height - 2 * gap;
             int above = anchor.Top - work.Top - 2 * gap;
             int below = work.Bottom - anchor.Bottom - 2 * gap;
-            int desired = OverlayDpi.Pixels(desiredHeight, scale);
+            int desired = OverlayDpi.Pixels(PopoverHeight, scale);
             bool openAbove = desired <= above || above >= below;
             int sideHeight = openAbove ? above : below;
             int height = Math.Min(Math.Min(desired, maxHeight), Math.Max(OverlayDpi.Pixels(320, scale), sideHeight));
@@ -569,12 +565,18 @@ namespace CodexInputUsage
             return tab == PopoverTab.Session ? chrome + CardGridHeight + QuotaSectionHeight + ContextBarHeight : chrome;
         }
 
+        private static int VisibleTurnRows(PopoverTab tab, int rows, int logicalHeight)
+        {
+            if (tab == PopoverTab.History) return 0;
+            int limit = tab == PopoverTab.Turns ? (logicalHeight - TurnTableChromeHeight(tab)) / RowHeight : SessionVisibleRows;
+            return Math.Max(1, Math.Min(limit, rows));
+        }
+
         internal static Bitmap RenderPreviewBitmap(SessionMetricsSnapshot snap, ThemePalette palette, PopoverTab tab = PopoverTab.Session, float scale = 1f)
         {
             int rows = snap != null && snap.Turns != null ? snap.Turns.Count : 0;
-            int limit = tab == PopoverTab.Turns ? DetailVisibleRows : SessionVisibleRows;
-            int vis = Math.Max(1, Math.Min(limit, rows));
-            int height = TurnTableChromeHeight(tab) + vis * RowHeight;
+            int vis = VisibleTurnRows(tab, rows, PopoverHeight);
+            int height = PopoverHeight;
             var bmp = new Bitmap(OverlayDpi.Pixels(PopoverWidth, scale), OverlayDpi.Pixels(height, scale), PixelFormat.Format32bppArgb);
             using (var g = Graphics.FromImage(bmp))
             {
@@ -592,7 +594,7 @@ namespace CodexInputUsage
         internal static Bitmap RenderHistoryPreviewBitmap(SessionMetricsSnapshot snap, HistoryStatsSnapshot history, ThemePalette palette, float scale = 1f)
         {
             var hist = history ?? new HistoryStatsSnapshot();
-            int height = HistoryHeight(hist);
+            int height = PopoverHeight;
             var bmp = new Bitmap(OverlayDpi.Pixels(PopoverWidth, scale), OverlayDpi.Pixels(height, scale), PixelFormat.Format32bppArgb);
             using (var g = Graphics.FromImage(bmp))
             {
@@ -706,10 +708,11 @@ namespace CodexInputUsage
                 }
 
                 // 3. Session View: 2x2 KPI Cards
-                int gridTop = y + 8;
+                int gridTop = y + 5;
                 int gap = 8;
+                int rowGap = 6;
                 int cardW = (size.Width - (Pad * 2) - gap) / 2;
-                int cardH = 56;
+                int cardH = 54;
 
                 // Card 1: TPS + Session Avg TPS
                 string tpsVal = MetricFormatter.FormatTps(snap.DisplayTps, snap.TpsIsHeld);
@@ -758,7 +761,7 @@ namespace CodexInputUsage
                         MetricFormatter.CompactTokens(latest.OutputTokens),
                         MetricFormatter.FormatCacheTwoDecimals(latest.CacheHitPct))
                     : "尚无已完成轮次";
-                DrawKpiCard(g, new Rectangle(Pad, gridTop + cardH + gap, cardW, cardH),
+                DrawKpiCard(g, new Rectangle(Pad, gridTop + cardH + rowGap, cardW, cardH),
                     latest != null ? ("最近一轮 #" + latest.Index) : "最近一轮",
                     turnHero, turnSub, pal.TextPrimary, pal, labelFont, heroFont, subFont);
 
@@ -770,7 +773,7 @@ namespace CodexInputUsage
                         MetricFormatter.CompactTokens(snap.OutputTokens),
                         MetricFormatter.CompactTokens(snap.ReasoningOutputTokens))
                     : "尚无累计用量";
-                DrawKpiCard(g, new Rectangle(Pad + cardW + gap, gridTop + cardH + gap, cardW, cardH),
+                DrawKpiCard(g, new Rectangle(Pad + cardW + gap, gridTop + cardH + rowGap, cardW, cardH),
                     "会话累计", cumHero, cumSub, pal.TextPrimary, pal, labelFont, heroFont, subFont);
 
                 y += CardGridHeight;
@@ -1441,13 +1444,13 @@ namespace CodexInputUsage
             // Bottom line: reset countdown on left + live/credit tag on right
             string footLeft = !string.IsNullOrEmpty(countdown) ? countdown : (hasVal ? "配额已同步" : "等待配额数据");
             using (var mBrush = new SolidBrush(pal.TextMuted))
-                g.DrawString(footLeft, subFont, mBrush, ix, rect.Y + 40);
+                g.DrawString(footLeft, subFont, mBrush, ix, rect.Y + 36);
 
             if (!string.IsNullOrEmpty(rightTag))
             {
                 using (var tagBrush = new SolidBrush(pal.TextSecondary))
                 using (var rightFmt = new StringFormat { Alignment = StringAlignment.Far })
-                    g.DrawString(rightTag, subFont, tagBrush, rect.Right - 10, rect.Y + 40, rightFmt);
+                    g.DrawString(rightTag, subFont, tagBrush, rect.Right - 10, rect.Y + 36, rightFmt);
             }
         }
 
@@ -1528,10 +1531,10 @@ namespace CodexInputUsage
                 }
             }
 
-            int gridY = cardRect.Y + 47;
+            int gridY = cardRect.Y + 43;
             int colGap = 18;
             int colW = (innerW - colGap) / 2;
-            int itemRowH = 21;
+            int itemRowH = 17;
 
             using (var chLabelFont = OverlayDpi.FontAt96Dpi("Microsoft YaHei UI", 8.3f, FontStyle.Regular))
             using (var chValFont = OverlayDpi.FontAt96Dpi("Segoe UI Semibold", 8.6f, FontStyle.Regular))
