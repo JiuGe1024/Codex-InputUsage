@@ -31,7 +31,7 @@ namespace CodexInputUsage
         private const int WmKeyDown = 0x0100;
         private const int VkEscape = 0x1B;
 
-        private const int PopoverWidth = 516;
+        private const int PopoverWidth = 540;
         private const int Pad = 14;
         private const int HeaderHeight = 38;
         private const int TabBarHeight = 34;
@@ -636,17 +636,25 @@ namespace CodexInputUsage
                 // Card 1: TPS + Session Avg TPS
                 string tpsVal = MetricFormatter.FormatTps(snap.DisplayTps, snap.TpsIsHeld);
                 string tpsHero = tpsVal == "--" ? "-- tok/s" : (tpsVal + " tok/s");
-                string avgPart = snap.SessionAvgTps.HasValue
-                    ? ("均速 " + snap.SessionAvgTps.Value.ToString("0.0", CultureInfo.InvariantCulture) + " · ")
-                    : string.Empty;
-                string tpsSub = string.Format("{0}首字 {1} · 活跃 {2}",
-                    avgPart,
+                string avgHero = snap.SessionAvgTps.HasValue
+                    ? snap.SessionAvgTps.Value.ToString("0.0", CultureInfo.InvariantCulture) + " tok/s"
+                    : "—";
+                string tpsSub = string.Format("首字 {0} · 活跃 {1}",
                     MetricFormatter.FormatSeconds(snap.LatestTtftMs),
                     MetricFormatter.FormatSeconds(snap.LatestModelActiveMs));
                 Color tpsColor = snap.DisplayTps.HasValue ? pal.ForTier(MetricFormatter.ClassifySpeed(snap.DisplayTps)) : pal.TextMuted;
                 DrawKpiCard(g, new Rectangle(Pad, gridTop, cardW, cardH),
-                    snap.IsStreaming ? "输出速度 (生成中)" : "输出速度 (TPS)",
+                    snap.IsStreaming ? "输出速度 · 生成中" : "输出速度",
                     tpsHero, tpsSub, tpsColor, pal, labelFont, heroFont, subFont);
+                int speedDivider = Pad + cardW / 2;
+                using (var divider = new Pen(pal.Border))
+                using (var caption = new SolidBrush(pal.TextSecondary))
+                using (var average = new SolidBrush(snap.SessionAvgTps.HasValue ? pal.AccentBlue : pal.TextMuted))
+                {
+                    g.DrawLine(divider, speedDivider, gridTop + 9, speedDivider, gridTop + 37);
+                    g.DrawString("会话平均速度", labelFont, caption, speedDivider + 8, gridTop + 6);
+                    g.DrawString(avgHero, heroFont, average, speedDivider + 7, gridTop + 19);
+                }
 
                 // Card 2: Cache Hit Rate (Turn / Session — 2 decimal places)
                 var latest = snap.LatestTurn;
@@ -823,13 +831,13 @@ namespace CodexInputUsage
             tabTurnsRect = new Rectangle(tabSessionRect.Right + innerPad, tabY, tabWidth, tabHeight);
             tabHistoryRect = new Rectangle(tabTurnsRect.Right + innerPad, tabY, outer.Right - tabTurnsRect.Right - 2 * innerPad, tabHeight);
 
-            DrawSingleTab(g, tabSessionRect, "当前会话", activeTab == PopoverTab.Session, hoveredTab == 0, pal, boldFont, regularFont);
-            DrawSingleTab(g, tabTurnsRect, "逐轮明细", activeTab == PopoverTab.Turns, hoveredTab == 2, pal, boldFont, regularFont);
-            DrawSingleTab(g, tabHistoryRect, "今日与 7 日汇总", activeTab == PopoverTab.History, hoveredTab == 1, pal, boldFont, regularFont);
+            DrawSingleTab(g, tabSessionRect, "当前会话", PopoverTab.Session, activeTab == PopoverTab.Session, hoveredTab == 0, pal, boldFont, regularFont);
+            DrawSingleTab(g, tabTurnsRect, "逐轮明细", PopoverTab.Turns, activeTab == PopoverTab.Turns, hoveredTab == 2, pal, boldFont, regularFont);
+            DrawSingleTab(g, tabHistoryRect, "今日与 7 日汇总", PopoverTab.History, activeTab == PopoverTab.History, hoveredTab == 1, pal, boldFont, regularFont);
         }
 
         private static void DrawSingleTab(
-            Graphics g, Rectangle rect, string text, bool active, bool hovered,
+            Graphics g, Rectangle rect, string text, PopoverTab tab, bool active, bool hovered,
             ThemePalette pal, Font boldFont, Font regularFont)
         {
             if (active)
@@ -849,9 +857,37 @@ namespace CodexInputUsage
                     g.FillPath(fill, path);
             }
 
-            using (var fmt = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-            using (var brush = new SolidBrush(active ? pal.TextPrimary : (hovered ? pal.TextPrimary : pal.TextSecondary)))
-                g.DrawString(text, active ? boldFont : regularFont, brush, rect, fmt);
+            var font = active ? boldFont : regularFont;
+            Color color = active || hovered ? pal.TextPrimary : pal.TextSecondary;
+            using (var fmt = new StringFormat { LineAlignment = StringAlignment.Center })
+            using (var brush = new SolidBrush(color))
+            using (var pen = new Pen(color, 1.15f) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
+            {
+                const int iconSlot = 17;
+                int x = rect.X + (rect.Width - iconSlot - (int)Math.Ceiling(g.MeasureString(text, font).Width)) / 2;
+                int y = rect.Y + (rect.Height - 12) / 2;
+                switch (tab)
+                {
+                    case PopoverTab.Session:
+                        g.DrawPolygon(pen, new[] { new Point(x + 1, y + 1), new Point(x + 11, y + 1), new Point(x + 11, y + 8),
+                            new Point(x + 6, y + 8), new Point(x + 3, y + 11), new Point(x + 3, y + 8), new Point(x + 1, y + 8) });
+                        break;
+                    case PopoverTab.Turns:
+                        for (int line = y + 2; line <= y + 10; line += 4)
+                        {
+                            g.DrawLine(pen, x + 1, line, x + 2, line);
+                            g.DrawLine(pen, x + 5, line, x + 11, line);
+                        }
+                        break;
+                    case PopoverTab.History:
+                        g.DrawLine(pen, x + 1, y + 11, x + 11, y + 11);
+                        g.DrawLine(pen, x + 2, y + 8, x + 2, y + 6);
+                        g.DrawLine(pen, x + 6, y + 8, x + 6, y + 2);
+                        g.DrawLine(pen, x + 10, y + 8, x + 10, y + 4);
+                        break;
+                }
+                g.DrawString(text, font, brush, new RectangleF(x + iconSlot, rect.Y, rect.Right - x - iconSlot, rect.Height), fmt);
+            }
         }
 
         private static void RenderHistoryBody(
@@ -1490,9 +1526,10 @@ namespace CodexInputUsage
             int rightEdge = size.Width - Pad - (needScroll ? 12 : 0);
             int colIndex = Pad;
             int colModel = Pad + 40;
-            int colSpeed = Pad + 153;
-            int colFirst = Pad + 239;
-            int colTokens = Pad + 290;
+            int colSpeed = Pad + 145;
+            int colFirst = Pad + 226;
+            int colTokens = Pad + 273;
+            int colTotal = rightEdge - 53;
 
             using (var titleBrush = new SolidBrush(pal.TextPrimary))
             using (var mutedBrush = new SolidBrush(pal.TextSecondary))
@@ -1512,6 +1549,7 @@ namespace CodexInputUsage
                 g.DrawString("速度", headFont, mutedBrush, colSpeed, headY);
                 g.DrawString("首字", headFont, mutedBrush, colFirst, headY);
                 g.DrawString("上下文 / 思考 / 正文", headFont, mutedBrush, colTokens, headY);
+                g.DrawString("Token 消耗", headFont, mutedBrush, colTotal, headY, rightFmt);
                 g.DrawString("缓存", headFont, mutedBrush, rightEdge, headY, rightFmt);
             }
 
@@ -1577,6 +1615,7 @@ namespace CodexInputUsage
                     string usage = context + " / " + MetricFormatter.CompactTokens(t.ReasoningOutputTokens)
                         + " / " + MetricFormatter.CompactTokens(Math.Max(0, t.OutputTokens - t.ReasoningOutputTokens));
                     g.DrawString(usage, dataFont, textBrush, colTokens, ty);
+                    g.DrawString(MetricFormatter.CompactTokens(t.TotalTokens), valueFont, textBrush, colTotal, ty, rightFmt);
 
                     Color cacheColor = t.CacheHitPct.HasValue ? pal.ForTier(MetricFormatter.ClassifyCache(t.CacheHitPct)) : pal.TextMuted;
                     using (var cacheBrush = new SolidBrush(cacheColor))
