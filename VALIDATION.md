@@ -56,6 +56,14 @@
 - 自检 `dpi_tests logicalHit=True workArea=True`。离屏模拟在 100%、125%、150%、200% 分别验证了窗口范围、圆角区域、页签点击、逐轮滚轮与拖动、受限视口滚动及末行命中。记录在 `work/dpi-qa-20261122-201132/dpi-interaction-check.txt`。
 - 正式产物已启动，日志确认新版浮层进程识别了 Codex。只替换了 InputUsage 浮层进程。
 
+### 8. 常驻条排版改版
+
+- 正式构建退出码 0，编译器 0 错误、0 警告。既有 `match_tests`、`quota_reset_tests`、`settings_test`、`dpi_tests` 全通过。
+- 新增 `strip_style_tests layout=True slots=True speedTiers=True repaint=True`，覆盖完整与紧凑档、窄窗省略及单值回退、单槽位、四档速度色与无数据色，以及显示数字相同但色阶变化时重绘。
+- 用同一 25 轮真实日志比对 96 DPI 完整档，从 `332×24` 收窄到 `265×24`（约 20%）。紧凑档 `232×24`。本次额度为 94% 时，带 5h 胶囊的完整档 `331×24`。150% 完整档 `398×36`。
+- 已目视核对 `work/preview-strip-light.png`、`preview-strip-dark.png`、`preview-strip-compact-light.png`、`preview-strip-quota5h-light.png` 与 `preview-dpi150-strip.png`。检查了字体、胶囊对齐、语义着色与矢量竖线。自 `a2a3b2b` 起，150% 的三页详情预览均为 `810×912`。
+- 正式产物已部署，只重启 InputUsage 浮层。实际进程日志记录了单屏 96 DPI 启动和 Codex 识别。
+
 ## 未在本终端执行的验证边界
 
 - 真实高 DPI 显示器上的停靠、异 DPI 双屏拖移与弹窗实机点击尚未复测。本轮的高 DPI 数据来自离屏渲染与模拟输入。

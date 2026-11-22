@@ -364,6 +364,7 @@ namespace CodexInputUsage
                 roundTripOk, guardOk,
                 quota5hVars.Length > 0 ? quota5hVars[0].Describe() : "",
                 customVars.Length > 0 ? customVars[0].Describe() : ""));
+            bool stripStyleOk = CheckStripStyle(sb);
 
             // 5. Verify Today & 7-Day History aggregation directly from state_5.sqlite
             var histReader = new HistoryStatsReader();
@@ -447,7 +448,48 @@ namespace CodexInputUsage
             }
             sb.AppendLine(string.Format("dpi_tests logicalHit={0} workArea={1}", dpiHit, dpiBounds));
             File.WriteAllText(Path.Combine(workDir, "selftest-report.txt"), sb.ToString(), Encoding.UTF8);
-            if (!quotaFuture || !quotaReset || !quotaMissing || !dpiHit || !dpiBounds) Environment.ExitCode = 1;
+            if (!quotaFuture || !quotaReset || !quotaMissing || !dpiHit || !dpiBounds || !stripStyleOk) Environment.ExitCode = 1;
+        }
+
+        private static bool CheckStripStyle(StringBuilder report)
+        {
+            var sample = new SessionMetricsSnapshot
+            {
+                HasUsage = true,
+                DisplayTps = 40,
+                LatestTurn = new TurnSummary { TotalTokens = 407632, CacheHitPct = 99.83 },
+                TotalTokens = 39287962,
+                SessionCacheHitPct = 96.66,
+                PrimaryUsedPct = 60
+            };
+            var variants = StripRenderModel.BuildVariants(sample);
+            bool layout = variants.Length == 4
+                && variants[0].Describe() == "\u26A1 40 tok/s | [407.6K / 39.3M] | [100% / 97%]"
+                && variants[1].Describe() == "\u26A1 40/s | [407.6K/39.3M] | [100%/97%]"
+                && variants[2].Describe() == "[407.6K/39.3M] | [100%/97%]"
+                && variants[3].Describe() == "[39.3M] | [97%]"
+                && StripRenderModel.BuildVariants(sample, new StripSlotPreferences { ShowQuota5h = true })[0].Describe()
+                    == variants[0].Describe() + " | [5h 40%]";
+            var turnOnly = new StripSlotPreferences { ShowTps = false, ShowSessionTotal = false, ShowCache = false };
+            var speedOnly = new StripSlotPreferences { ShowLatestTurn = false, ShowSessionTotal = false, ShowCache = false };
+            bool slots = StripRenderModel.BuildVariants(sample, turnOnly)[0].Describe() == "[407.6K]"
+                && StripRenderModel.BuildVariants(sample, speedOnly).All(model => model.TpsText != null && !model.Describe().Contains("|"));
+
+            var speeds = new double?[] { 60, 35, 20, 19.9, null };
+            var tiers = new[] { MetricTier.Good, MetricTier.Info, MetricTier.Warn, MetricTier.Danger, MetricTier.Muted };
+            bool speedTiers = true;
+            for (int i = 0; i < speeds.Length; i++)
+            {
+                sample.DisplayTps = speeds[i];
+                speedTiers &= StripRenderModel.BuildVariants(sample)[0].TpsTier == tiers[i];
+            }
+            sample.DisplayTps = 59.9;
+            var below = StripRenderModel.BuildVariants(sample)[0];
+            sample.DisplayTps = 60;
+            var above = StripRenderModel.BuildVariants(sample)[0];
+            bool repaint = below.Describe() == above.Describe() && below.RenderKey() != above.RenderKey();
+            report.AppendLine(string.Format("strip_style_tests layout={0} slots={1} speedTiers={2} repaint={3}", layout, slots, speedTiers, repaint));
+            return layout && slots && speedTiers && repaint;
         }
 
         private static void SaveDpiPreview(Bitmap bitmap, string name, string workDir, StringBuilder report)

@@ -17,8 +17,8 @@
 | `src/overlay/RolloutMetrics.cs` | 增量字节偏移解析 rollout JSONL：解析 `turn_context`（每轮模型/推理档位）与去重统计每轮上下文输入、思考/正文输出、会话累计 Token、缓存命中率、会话加权均速（Avg TPS）；TPS 分母采用 `整轮耗时 - (工具区间并集 - 与模型重叠)`；解析 `world_state`/`response_item`/`additional_tools`/`compacted` 生成十通道上下文拆分并按 Hamilton 最大余数法等比缩放至官方 `ContextUsedTokens` |
 | `src/overlay/ComposerDock.cs` | 独立 MTA 线程通过 UIA 定位 `ProseMirror -> composer -> Context 圆环 / 模型选择器 / 左侧按钮簇`，支持单次快速重读、`AutoResetEvent` 即时唤醒与切窗锚点缓存 |
 | `src/overlay/HostWindowEvents.cs` | UI 线程进程外 Win32 `SetWinEventHook`：全局监听切窗/最小化（`<1ms` 隐藏与首帧恢复），按 Codex PID 精确监听 `EVENT_OBJECT_LOCATIONCHANGE` 驱动拖动/缩放快路径 |
-| `src/overlay/StripForm.cs` | `WS_EX_LAYERED` + `UpdateLayeredWindow` 32 位预乘 Alpha 透明渲染：矢量琥珀金闪电 + 可配置槽位（TPS / 本轮 / 累计 / 语义缓存微胶囊 / 可选 `5h XX%` 实时额度微胶囊），右键菜单微调并多档窄窗自适应，纯平移走 `MoveFast`（`SWP_NOREDRAW` 零重绘） |
-| `src/overlay/DetailPopoverForm.cs` | 点击状态条在上方展开监控卡片（`540px` 宽、`WS_EX_NOACTIVATE`）：顶部带矢量图标的「当前会话 / 逐轮明细 / 今日与 7 日汇总」三页签切换、标题栏模型徽标与「钉住」开关、点击外部/`Esc` 自动收起；会话页含 2×2 指标卡（输出速度与会话平均速度并列）、双列实时额度卡与十通道上下文卡；逐轮明细页含模型/速度/首字/上下文-思考-正文/Token 消耗/缓存表格与可拖拽滚动条；汇总页含今日/7 日双卡、可悬停查精确值的 7 日柱状图、按模型分布与近 7 日 Top 5 会话 |
+| `src/overlay/StripForm.cs` | `WS_EX_LAYERED` + `UpdateLayeredWindow` 32 位预乘 Alpha 透明渲染：Segoe UI Variable Text Semibold（带 Segoe UI 回退）、语义着色的 TPS 与矢量闪电、中性本轮/累计 Token 胶囊、语义缓存胶囊和可选 5h 额度胶囊。可见槽位以细竖线分隔，绘制与测量共用布局，支持右键配置与四档窄窗适配，纯平移走 `MoveFast`（`SWP_NOREDRAW` 零重绘） |
+| `src/overlay/DetailPopoverForm.cs` | 点击状态条在上方展开监控卡片（三页签共用 `540×608` 逻辑尺寸、`WS_EX_NOACTIVATE`）：顶部带矢量图标的「当前会话 / 逐轮明细 / 今日与 7 日汇总」三页签切换、标题栏模型徽标与「钉住」开关、点击外部/`Esc` 自动收起；会话页含 2×2 指标卡（输出速度与会话平均速度并列）、双列实时额度卡与十通道上下文卡；逐轮明细页含模型/速度/首字/上下文-思考-正文/Token 消耗/缓存表格与可拖拽滚动条；汇总页含今日/7 日双卡、可悬停查精确值的 7 日柱状图、按模型分布与近 7 日 Top 5 会话 |
 | `src/overlay/CodexTheme.cs` | 读取 `~/.codex/config.toml` 的 `appearanceTheme`（回退系统主题），提供明暗双主题与十通道上下文色板 |
 | `src/overlay/Program.cs` | 协调所有子系统、单实例互斥锁、系统托盘、`FileSystemWatcher` rollout 实时监听、`--exit-with-codex` 自动退出与 `--self-test` 自检 |
 
