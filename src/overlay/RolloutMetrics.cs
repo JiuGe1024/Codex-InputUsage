@@ -13,6 +13,9 @@ namespace CodexInputUsage
         internal int Index;
         internal string TurnId;
         internal bool Complete;
+        internal string Model;
+        internal string Effort;
+        internal long? ContextInputTokens;
         internal DateTime? CompletedAtLocal;
         internal long InputTokens;
         internal long CachedInputTokens;
@@ -282,6 +285,9 @@ namespace CodexInputUsage
             internal int Order;
             internal string TurnId;
             internal bool Complete;
+            internal string Model;
+            internal string Effort;
+            internal long? ContextInputTokens;
             internal DateTime? CompletedAtLocal;
             internal long? StartedAtMs;
             internal long? CompletedAtMs;
@@ -507,6 +513,7 @@ namespace CodexInputUsage
                 || line.IndexOf("\"response_item\"", StringComparison.Ordinal) >= 0
                 || line.IndexOf("\"world_state\"", StringComparison.Ordinal) >= 0
                 || line.IndexOf("\"compacted\"", StringComparison.Ordinal) >= 0
+                || line.IndexOf("\"turn_context\"", StringComparison.Ordinal) >= 0
                 || line.IndexOf("\"session_meta\"", StringComparison.Ordinal) >= 0;
         }
 
@@ -555,6 +562,17 @@ namespace CodexInputUsage
                 return true;
             }
 
+            if (rowType == "turn_context")
+            {
+                string turnId = GetStr(payload, "turn_id");
+                string model = GetStr(payload, "model");
+                if (string.IsNullOrWhiteSpace(turnId) || string.IsNullOrWhiteSpace(model)) return false;
+                var turn = GetOrCreateTurn(turnId);
+                turn.Model = model;
+                turn.Effort = GetStr(payload, "effort");
+                return true;
+            }
+
             if (rowType == "token_usage_record")
             {
                 string recThread = GetStr(payload, "thread_id");
@@ -576,6 +594,7 @@ namespace CodexInputUsage
                     if (!turn.Responses.ContainsKey(key))
                     {
                         turn.Responses[key] = own;
+                        if (own.Input > 0) turn.ContextInputTokens = own.Input;
                     }
                     long? evMs = ParseTimestampMs(GetStr(row, "timestamp"));
                     if (evMs.HasValue && (!turn.LastEventAtMs.HasValue || evMs.Value > turn.LastEventAtMs.Value))
@@ -866,6 +885,9 @@ namespace CodexInputUsage
                 Index = turn.Order,
                 TurnId = turn.TurnId,
                 Complete = turn.Complete,
+                Model = turn.Model,
+                Effort = turn.Effort,
+                ContextInputTokens = turn.ContextInputTokens,
                 CompletedAtLocal = turn.CompletedAtLocal,
                 InputTokens = inp,
                 CachedInputTokens = cached,

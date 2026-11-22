@@ -391,6 +391,10 @@ namespace CodexInputUsage
                 bmp.Save(Path.Combine(workDir, "preview-detail-light.png"), ImageFormat.Png);
             using (var bmp = DetailPopoverForm.RenderPreviewBitmap(snap, ThemePalette.Dark))
                 bmp.Save(Path.Combine(workDir, "preview-detail-dark.png"), ImageFormat.Png);
+            using (var bmp = DetailPopoverForm.RenderPreviewBitmap(snap, ThemePalette.Light, PopoverTab.Turns))
+                bmp.Save(Path.Combine(workDir, "preview-detail-turns-light.png"), ImageFormat.Png);
+            using (var bmp = DetailPopoverForm.RenderPreviewBitmap(snap, ThemePalette.Dark, PopoverTab.Turns))
+                bmp.Save(Path.Combine(workDir, "preview-detail-turns-dark.png"), ImageFormat.Png);
             using (var bmp = DetailPopoverForm.RenderHistoryPreviewBitmap(snap, hist, ThemePalette.Light))
                 bmp.Save(Path.Combine(workDir, "preview-detail-history-light.png"), ImageFormat.Png);
             using (var bmp = DetailPopoverForm.RenderHistoryPreviewBitmap(snap, hist, ThemePalette.Dark))

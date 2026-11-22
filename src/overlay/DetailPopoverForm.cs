@@ -13,7 +13,8 @@ namespace CodexInputUsage
     internal enum PopoverTab
     {
         Session = 0,
-        History = 1
+        History = 1,
+        Turns = 2
     }
 
     internal sealed class DetailPopoverForm : Form
@@ -40,7 +41,8 @@ namespace CodexInputUsage
         private const int TableHeaderHeight = 44;
         private const int RowHeight = 24;
         private const int InspectorHeight = 28;
-        private const int MaxVisibleRows = 6;
+        private const int SessionVisibleRows = 5;
+        private const int DetailVisibleRows = 16;
 
         private const int HistSummaryHeight = 70;
         private const int HistChartHeight = 162;
@@ -81,6 +83,7 @@ namespace CodexInputUsage
         private Rectangle _pinButtonRect = Rectangle.Empty;
         private Rectangle _tabSessionRect = Rectangle.Empty;
         private Rectangle _tabHistoryRect = Rectangle.Empty;
+        private Rectangle _tabTurnsRect = Rectangle.Empty;
         private Rectangle _tableRowsRect = Rectangle.Empty;
         private Rectangle _scrollTrackRect = Rectangle.Empty;
         private Rectangle _scrollThumbRect = Rectangle.Empty;
@@ -91,7 +94,7 @@ namespace CodexInputUsage
         private int _hoveredTab = -1;
         private bool _isPinned;
         private int _scrollOffset;
-        private int _visibleRows = MaxVisibleRows;
+        private int _visibleRows = SessionVisibleRows;
         private int _hoveredRowIndex = -1;
         private int _selectedTurnIndex = -1;
         private int _hoveredDayIndex = -1;
@@ -220,13 +223,15 @@ namespace CodexInputUsage
 
         internal void UpdateData(SessionMetricsSnapshot snapshot, ThemePalette palette, Rectangle anchorStrip)
         {
+            if (!string.Equals(_snapshot.ThreadId, snapshot == null ? null : snapshot.ThreadId, StringComparison.OrdinalIgnoreCase))
+            {
+                _scrollOffset = 0;
+                _selectedTurnIndex = -1;
+                _hoveredRowIndex = -1;
+            }
             _snapshot = snapshot ?? new SessionMetricsSnapshot();
             _palette = palette ?? ThemePalette.Light;
             _anchorStrip = anchorStrip;
-
-            int totalRows = _snapshot.Turns != null ? _snapshot.Turns.Count : 0;
-            int maxScroll = Math.Max(0, totalRows - _visibleRows);
-            if (_scrollOffset > maxScroll) _scrollOffset = maxScroll;
 
             PositionAbove(anchorStrip);
             Invalidate();
@@ -257,11 +262,13 @@ namespace CodexInputUsage
             else
             {
                 int rows = _snapshot.Turns != null ? _snapshot.Turns.Count : 0;
-                int targetRows = Math.Max(1, Math.Min(MaxVisibleRows, rows));
-                int chromeHeight = HeaderHeight + TabBarHeight + CardGridHeight + QuotaSectionHeight + ContextBarHeight + TableHeaderHeight + InspectorHeight + 12;
-                int desiredHeight = chromeHeight + (targetRows * RowHeight);
-                height = Math.Min(desiredHeight, maxHeight);
-                _visibleRows = Math.Max(1, Math.Min(MaxVisibleRows, (height - chromeHeight) / RowHeight));
+                bool detail = _activeTab == PopoverTab.Turns;
+                int rowLimit = detail ? DetailVisibleRows : SessionVisibleRows;
+                int targetRows = Math.Max(1, Math.Min(rowLimit, rows));
+                int chromeHeight = TurnTableChromeHeight(_activeTab);
+                height = Math.Min(chromeHeight + targetRows * RowHeight, maxHeight);
+                _visibleRows = Math.Max(1, Math.Min(targetRows, (height - chromeHeight) / RowHeight));
+                _scrollOffset = detail ? Math.Min(_scrollOffset, Math.Max(0, rows - _visibleRows)) : 0;
             }
 
             int x = anchor.Right - PopoverWidth;
@@ -283,7 +290,7 @@ namespace CodexInputUsage
         protected override void OnMouseWheel(MouseEventArgs e)
         {
             base.OnMouseWheel(e);
-            if (_activeTab != PopoverTab.Session) return;
+            if (_activeTab != PopoverTab.Turns) return;
             int totalRows = _snapshot.Turns != null ? _snapshot.Turns.Count : 0;
             int maxScroll = Math.Max(0, totalRows - _visibleRows);
             if (maxScroll <= 0) return;
@@ -299,7 +306,7 @@ namespace CodexInputUsage
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
-            if (e.Button != MouseButtons.Left || _activeTab != PopoverTab.Session) return;
+            if (e.Button != MouseButtons.Left || _activeTab != PopoverTab.Turns) return;
 
             int totalRows = _snapshot.Turns != null ? _snapshot.Turns.Count : 0;
             int maxScroll = Math.Max(0, totalRows - _visibleRows);
@@ -348,10 +355,11 @@ namespace CodexInputUsage
             int nextHoverTab = -1;
             if (_tabSessionRect.Contains(e.Location)) nextHoverTab = 0;
             else if (_tabHistoryRect.Contains(e.Location)) nextHoverTab = 1;
+            else if (_tabTurnsRect.Contains(e.Location)) nextHoverTab = 2;
 
             int nextHoverRow = -1;
             int nextHoverDay = -1;
-            if (_activeTab == PopoverTab.Session)
+            if (_activeTab != PopoverTab.History)
             {
                 if (!_tableRowsRect.IsEmpty && _tableRowsRect.Contains(e.Location))
                 {
@@ -384,7 +392,7 @@ namespace CodexInputUsage
             _hoveredRowIndex = nextHoverRow;
             _hoveredDayIndex = nextHoverDay;
             bool hand = overClose || overPin || nextHoverTab >= 0 || nextHoverRow >= 0 || nextHoverDay >= 0
-                || (_activeTab == PopoverTab.Session && !_scrollThumbRect.IsEmpty && _scrollThumbRect.Contains(e.Location));
+                || (_activeTab == PopoverTab.Turns && !_scrollThumbRect.IsEmpty && _scrollThumbRect.Contains(e.Location));
             Cursor = hand ? Cursors.Hand : Cursors.Default;
             if (needRepaint) Invalidate();
         }
@@ -431,32 +439,27 @@ namespace CodexInputUsage
                 return;
             }
 
-            if (_tabSessionRect.Contains(e.Location))
+            PopoverTab? targetTab = null;
+            if (_tabSessionRect.Contains(e.Location)) targetTab = PopoverTab.Session;
+            else if (_tabHistoryRect.Contains(e.Location)) targetTab = PopoverTab.History;
+            else if (_tabTurnsRect.Contains(e.Location)) targetTab = PopoverTab.Turns;
+            if (targetTab.HasValue)
             {
-                if (_activeTab != PopoverTab.Session)
+                if (_activeTab != targetTab.Value)
                 {
-                    _activeTab = PopoverTab.Session;
-                    _hoveredDayIndex = -1;
-                    PositionAbove(_anchorStrip);
-                    Invalidate();
-                }
-                return;
-            }
-
-            if (_tabHistoryRect.Contains(e.Location))
-            {
-                if (_activeTab != PopoverTab.History)
-                {
-                    _activeTab = PopoverTab.History;
+                    _activeTab = targetTab.Value;
                     _hoveredRowIndex = -1;
-                    if (HistoryTabActivated != null) HistoryTabActivated(this, EventArgs.Empty);
+                    _selectedTurnIndex = -1;
+                    _hoveredDayIndex = -1;
+                    if (_activeTab == PopoverTab.History && HistoryTabActivated != null)
+                        HistoryTabActivated(this, EventArgs.Empty);
                     PositionAbove(_anchorStrip);
                     Invalidate();
                 }
                 return;
             }
 
-            if (_activeTab == PopoverTab.Session)
+            if (_activeTab != PopoverTab.History)
             {
                 if (!_tableRowsRect.IsEmpty && _tableRowsRect.Contains(e.Location))
                 {
@@ -494,25 +497,32 @@ namespace CodexInputUsage
                 _hoveredDayIndex, _selectedDayIndex, _hoveredTab,
                 _isPinned, _pinHovered, _closeHovered,
                 out _pinButtonRect, out _closeButtonRect,
-                out _tabSessionRect, out _tabHistoryRect,
+                out _tabSessionRect, out _tabHistoryRect, out _tabTurnsRect,
                 out _tableRowsRect, out _scrollTrackRect, out _scrollThumbRect,
                 out _dayBarRects);
         }
 
-        internal static Bitmap RenderPreviewBitmap(SessionMetricsSnapshot snap, ThemePalette palette)
+        private static int TurnTableChromeHeight(PopoverTab tab)
+        {
+            int chrome = HeaderHeight + TabBarHeight + TableHeaderHeight + InspectorHeight + 12;
+            return tab == PopoverTab.Session ? chrome + CardGridHeight + QuotaSectionHeight + ContextBarHeight : chrome;
+        }
+
+        internal static Bitmap RenderPreviewBitmap(SessionMetricsSnapshot snap, ThemePalette palette, PopoverTab tab = PopoverTab.Session)
         {
             int rows = snap != null && snap.Turns != null ? snap.Turns.Count : 0;
-            int vis = Math.Max(1, Math.Min(MaxVisibleRows, rows));
-            int height = HeaderHeight + TabBarHeight + CardGridHeight + QuotaSectionHeight + ContextBarHeight + TableHeaderHeight + (vis * RowHeight) + InspectorHeight + 12;
+            int limit = tab == PopoverTab.Turns ? DetailVisibleRows : SessionVisibleRows;
+            int vis = Math.Max(1, Math.Min(limit, rows));
+            int height = TurnTableChromeHeight(tab) + vis * RowHeight;
             var bmp = new Bitmap(PopoverWidth, height, PixelFormat.Format32bppArgb);
             using (var g = Graphics.FromImage(bmp))
             {
-                Rectangle r1, r2, r3, r4, r5, r6, r7;
+                Rectangle r1, r2, r3, r4, r5, r6, r7, r8;
                 Rectangle[] dBars;
                 RenderCard(g, new Size(PopoverWidth, height), snap ?? new SessionMetricsSnapshot(), new HistoryStatsSnapshot(),
-                    PopoverTab.Session, palette,
+                    tab, palette,
                     0, vis, 0, -1, -1, -1, -1, false, false, false,
-                    out r1, out r2, out r3, out r4, out r5, out r6, out r7, out dBars);
+                    out r1, out r2, out r3, out r4, out r5, out r6, out r7, out r8, out dBars);
             }
             return bmp;
         }
@@ -524,12 +534,12 @@ namespace CodexInputUsage
             var bmp = new Bitmap(PopoverWidth, height, PixelFormat.Format32bppArgb);
             using (var g = Graphics.FromImage(bmp))
             {
-                Rectangle r1, r2, r3, r4, r5, r6, r7;
+                Rectangle r1, r2, r3, r4, r5, r6, r7, r8;
                 Rectangle[] dBars;
                 RenderCard(g, new Size(PopoverWidth, height), snap ?? new SessionMetricsSnapshot(), hist,
                     PopoverTab.History, palette,
                     0, 0, -1, -1, -1, -1, -1, false, false, false,
-                    out r1, out r2, out r3, out r4, out r5, out r6, out r7, out dBars);
+                    out r1, out r2, out r3, out r4, out r5, out r6, out r7, out r8, out dBars);
             }
             return bmp;
         }
@@ -562,6 +572,7 @@ namespace CodexInputUsage
             out Rectangle closeRect,
             out Rectangle tabSessionRect,
             out Rectangle tabHistoryRect,
+            out Rectangle tabTurnsRect,
             out Rectangle tableRowsRect,
             out Rectangle scrollTrackRect,
             out Rectangle scrollThumbRect,
@@ -596,9 +607,16 @@ namespace CodexInputUsage
                 using (var sep = new Pen(pal.Border, 1f))
                     g.DrawLine(sep, 1, y, size.Width - 2, y);
 
-                // 2. Segmented Tab Bar ("当前会话" | "今日与 7 日汇总")
-                DrawTabBar(g, size.Width, y, activeTab, hoveredTab, pal, tableHeadFont, labelFont, out tabSessionRect, out tabHistoryRect);
+                // 2. Segmented Tab Bar
+                DrawTabBar(g, size.Width, y, activeTab, hoveredTab, pal, tableHeadFont, labelFont, out tabSessionRect, out tabHistoryRect, out tabTurnsRect);
                 y += TabBarHeight;
+
+                if (activeTab == PopoverTab.Turns)
+                {
+                    DrawTurnTable(g, size, y, snap, pal, true, scrollOffset, visibleRows, hoveredRow, selectedTurnIndex,
+                        tableHeadFont, subFont, out tableRowsRect, out scrollTrackRect, out scrollThumbRect);
+                    return;
+                }
 
                 if (activeTab == PopoverTab.History)
                 {
@@ -682,9 +700,9 @@ namespace CodexInputUsage
                 using (var sep = new Pen(pal.Border, 1f))
                     g.DrawLine(sep, Pad, y, size.Width - Pad, y);
 
-                // 5. Per-Turn Table with Visual Scrollbar + Interactive Row Inspector
-                DrawTurnTable(g, size, y, snap, pal, scrollOffset, visibleRows, hoveredRow, selectedTurnIndex,
-                    labelFont, tableHeadFont, subFont, monoFont, monoBoldFont,
+                // Recent turns on the session page.
+                DrawTurnTable(g, size, y, snap, pal, false, 0, visibleRows, hoveredRow, selectedTurnIndex,
+                    tableHeadFont, subFont,
                     out tableRowsRect, out scrollTrackRect, out scrollThumbRect);
             }
         }
@@ -786,7 +804,7 @@ namespace CodexInputUsage
         private static void DrawTabBar(
             Graphics g, int width, int y, PopoverTab activeTab, int hoveredTab, ThemePalette pal,
             Font boldFont, Font regularFont,
-            out Rectangle tabSessionRect, out Rectangle tabHistoryRect)
+            out Rectangle tabSessionRect, out Rectangle tabHistoryRect, out Rectangle tabTurnsRect)
         {
             var outer = new Rectangle(Pad, y + 6, width - (Pad * 2), 26);
             using (var oPath = StripForm.CreateRoundedPath(outer, 6))
@@ -798,11 +816,15 @@ namespace CodexInputUsage
             }
 
             int innerPad = 2;
-            int halfW = (outer.Width - (innerPad * 2) - 2) / 2;
-            tabSessionRect = new Rectangle(outer.X + innerPad, outer.Y + innerPad, halfW, outer.Height - (innerPad * 2));
-            tabHistoryRect = new Rectangle(tabSessionRect.Right + 2, outer.Y + innerPad, outer.Right - innerPad - (tabSessionRect.Right + 2), outer.Height - (innerPad * 2));
+            int tabWidth = (outer.Width - 4 * innerPad) / 3;
+            int tabHeight = outer.Height - 2 * innerPad;
+            int tabY = outer.Y + innerPad;
+            tabSessionRect = new Rectangle(outer.X + innerPad, tabY, tabWidth, tabHeight);
+            tabTurnsRect = new Rectangle(tabSessionRect.Right + innerPad, tabY, tabWidth, tabHeight);
+            tabHistoryRect = new Rectangle(tabTurnsRect.Right + innerPad, tabY, outer.Right - tabTurnsRect.Right - 2 * innerPad, tabHeight);
 
             DrawSingleTab(g, tabSessionRect, "当前会话", activeTab == PopoverTab.Session, hoveredTab == 0, pal, boldFont, regularFont);
+            DrawSingleTab(g, tabTurnsRect, "逐轮明细", activeTab == PopoverTab.Turns, hoveredTab == 2, pal, boldFont, regularFont);
             DrawSingleTab(g, tabHistoryRect, "今日与 7 日汇总", activeTab == PopoverTab.History, hoveredTab == 1, pal, boldFont, regularFont);
         }
 
@@ -1454,8 +1476,8 @@ namespace CodexInputUsage
 
         private static void DrawTurnTable(
             Graphics g, Size size, int topY, SessionMetricsSnapshot snap, ThemePalette pal,
-            int scrollOffset, int visibleRows, int hoveredRow, int selectedTurnIndex,
-            Font labelFont, Font headFont, Font subFont, Font monoFont, Font monoBoldFont,
+            bool detail, int scrollOffset, int visibleRows, int hoveredRow, int selectedTurnIndex,
+            Font headFont, Font subFont,
             out Rectangle tableRowsRect, out Rectangle scrollTrackRect, out Rectangle scrollThumbRect)
         {
             tableRowsRect = Rectangle.Empty;
@@ -1464,48 +1486,40 @@ namespace CodexInputUsage
 
             var turns = snap.Turns ?? new List<TurnSummary>();
             int count = turns.Count;
-            bool needScroll = count > visibleRows;
-            int scrollReserve = needScroll ? 12 : 0;
+            bool needScroll = detail && count > visibleRows;
+            int rightEdge = size.Width - Pad - (needScroll ? 12 : 0);
+            int colIndex = Pad;
+            int colModel = Pad + 40;
+            int colSpeed = Pad + 153;
+            int colFirst = Pad + 239;
+            int colTokens = Pad + 290;
 
             using (var titleBrush = new SolidBrush(pal.TextPrimary))
-            using (var mutedBrush = new SolidBrush(pal.TextMuted))
-            {
-                g.DrawString(string.Format("逐轮明细 ({0})", count), headFont, titleBrush, Pad, topY + 7);
-                string hint = needScroll
-                    ? string.Format("悬停/点击行看精确明细 · {0}-{1}/{2}", scrollOffset + 1, Math.Min(count, scrollOffset + visibleRows), count)
-                    : "悬停或点击行查看精确明细";
-                SizeF hSz = g.MeasureString(hint, labelFont);
-                g.DrawString(hint, labelFont, mutedBrush, size.Width - Pad - hSz.Width, topY + 6);
-            }
-
-            int rightEdge = size.Width - Pad - scrollReserve;
-            int colIdx = Pad;
-            int colTime = Pad + 30;
-            int colTps = Pad + 84;
-            int colTtft = Pad + 144;
-            int colIn = Pad + 204;
-            int colOut = Pad + 284;
-            int colTot = Pad + 344;
-
-            int headY = topY + 25;
-            using (var headBrush = new SolidBrush(pal.TextSecondary))
+            using (var mutedBrush = new SolidBrush(pal.TextSecondary))
             using (var rightFmt = new StringFormat { Alignment = StringAlignment.Far })
             {
-                g.DrawString("#", headFont, headBrush, colIdx, headY);
-                g.DrawString("时间", headFont, headBrush, colTime, headY);
-                g.DrawString("速度", headFont, headBrush, colTps + 48, headY, rightFmt);
-                g.DrawString("首字", headFont, headBrush, colTtft + 44, headY, rightFmt);
-                g.DrawString("输入", headFont, headBrush, colIn + 64, headY, rightFmt);
-                g.DrawString("输出", headFont, headBrush, colOut + 46, headY, rightFmt);
-                g.DrawString("总计", headFont, headBrush, colTot + 52, headY, rightFmt);
-                g.DrawString("缓存", headFont, headBrush, rightEdge, headY, rightFmt);
+                if (!detail)
+                    g.DrawString("最近五轮", headFont, titleBrush, Pad, topY + 7);
+                else if (count > 0)
+                {
+                    string range = string.Format("{0}–{1} / {2} 轮", scrollOffset + 1, Math.Min(count, scrollOffset + visibleRows), count);
+                    g.DrawString(range, headFont, mutedBrush, rightEdge, topY + 7, rightFmt);
+                }
+
+                int headY = topY + 25;
+                g.DrawString("步序", headFont, mutedBrush, colIndex, headY);
+                g.DrawString("模型", headFont, mutedBrush, colModel, headY);
+                g.DrawString("速度", headFont, mutedBrush, colSpeed, headY);
+                g.DrawString("首字", headFont, mutedBrush, colFirst, headY);
+                g.DrawString("上下文 / 思考 / 正文", headFont, mutedBrush, colTokens, headY);
+                g.DrawString("缓存", headFont, mutedBrush, rightEdge, headY, rightFmt);
             }
 
             int rowsStartY = topY + TableHeaderHeight;
             if (count == 0)
             {
                 using (var emptyBrush = new SolidBrush(pal.TextMuted))
-                    g.DrawString("当前会话暂无逐轮用量记录", labelFont, emptyBrush, Pad, rowsStartY + 4);
+                    g.DrawString("当前会话暂无逐轮用量记录", headFont, emptyBrush, Pad, rowsStartY + 4);
                 return;
             }
 
@@ -1513,6 +1527,9 @@ namespace CodexInputUsage
             tableRowsRect = new Rectangle(Pad - 4, rowsStartY, (rightEdge - Pad) + 8, vis * RowHeight);
             TurnSummary inspected = null;
 
+            using (var dataFont = new Font("Segoe UI", 9.1f, FontStyle.Regular, GraphicsUnit.Point))
+            using (var valueFont = new Font("Segoe UI", 9.1f, FontStyle.Bold, GraphicsUnit.Point))
+            using (var modelFormat = new StringFormat(StringFormatFlags.NoWrap) { Trimming = StringTrimming.EllipsisCharacter })
             using (var textBrush = new SolidBrush(pal.TextPrimary))
             using (var secBrush = new SolidBrush(pal.TextSecondary))
             using (var accentBrush = new SolidBrush(pal.AccentBlue))
@@ -1545,31 +1562,25 @@ namespace CodexInputUsage
                             g.FillRectangle(alt, Pad - 4, ry, (rightEdge - Pad) + 8, RowHeight);
                     }
 
-                    int ty = ry + 4;
-                    g.DrawString(t.Index.ToString(CultureInfo.InvariantCulture), monoFont, isSel ? accentBrush : secBrush, colIdx, ty);
-                    string timeStr = t.CompletedAtLocal.HasValue
-                        ? t.CompletedAtLocal.Value.ToString("HH:mm", CultureInfo.InvariantCulture)
-                        : (t.Complete ? "--" : "进行中");
-                    g.DrawString(timeStr, monoFont, secBrush, colTime, ty);
+                    int ty = ry + 3;
+                    g.DrawString("#" + t.Index.ToString(CultureInfo.InvariantCulture), dataFont, isSel ? accentBrush : secBrush, colIndex, ty);
 
-                    string tpsStr = t.Tps.HasValue ? (MetricFormatter.FormatTps(t.Tps, false) + "/s") : "--";
-                    Color tpsCol = t.Tps.HasValue ? pal.ForTier(MetricFormatter.ClassifySpeed(t.Tps)) : pal.TextMuted;
-                    using (var tpsBrush = new SolidBrush(tpsCol))
-                        g.DrawString(tpsStr, monoBoldFont, tpsBrush, colTps + 48, ty, rightFmt);
+                    string model = MetricFormatter.FormatModelBadge(t.Model, t.Effort);
+                    var modelRect = new RectangleF(colModel, ty, colSpeed - colModel - 4, RowHeight - 3);
+                    g.DrawString(model.Length > 0 ? model : "—", dataFont, textBrush, modelRect, modelFormat);
 
-                    string ttftStr = MetricFormatter.FormatSeconds(t.TtftMs);
-                    Color ttftCol = t.TtftMs.HasValue ? pal.ForTier(MetricFormatter.ClassifyTtft(t.TtftMs)) : pal.TextMuted;
-                    using (var ttftBrush = new SolidBrush(ttftCol))
-                        g.DrawString(ttftStr, monoFont, ttftBrush, colTtft + 44, ty, rightFmt);
+                    string speed = t.Tps.HasValue ? t.Tps.Value.ToString("0.0", CultureInfo.InvariantCulture) + " tok/s" : "—";
+                    g.DrawString(speed, valueFont, textBrush, colSpeed, ty);
+                    g.DrawString(MetricFormatter.FormatSeconds(t.TtftMs), dataFont, textBrush, colFirst, ty);
 
-                    g.DrawString(MetricFormatter.CompactTokens(t.InputTokens), monoFont, textBrush, colIn + 64, ty, rightFmt);
-                    g.DrawString(MetricFormatter.CompactTokens(t.OutputTokens), monoFont, textBrush, colOut + 46, ty, rightFmt);
-                    g.DrawString(MetricFormatter.CompactTokens(t.TotalTokens), monoBoldFont, textBrush, colTot + 52, ty, rightFmt);
+                    string context = t.ContextInputTokens.HasValue ? MetricFormatter.CompactTokens(t.ContextInputTokens.Value) : "—";
+                    string usage = context + " / " + MetricFormatter.CompactTokens(t.ReasoningOutputTokens)
+                        + " / " + MetricFormatter.CompactTokens(Math.Max(0, t.OutputTokens - t.ReasoningOutputTokens));
+                    g.DrawString(usage, dataFont, textBrush, colTokens, ty);
 
-                    string cacheStr = MetricFormatter.FormatCacheTwoDecimals(t.CacheHitPct);
-                    Color cacheCol = t.CacheHitPct.HasValue ? pal.ForTier(MetricFormatter.ClassifyCache(t.CacheHitPct)) : pal.TextMuted;
-                    using (var cacheBrush = new SolidBrush(cacheCol))
-                        g.DrawString(cacheStr, monoBoldFont, cacheBrush, rightEdge, ty, rightFmt);
+                    Color cacheColor = t.CacheHitPct.HasValue ? pal.ForTier(MetricFormatter.ClassifyCache(t.CacheHitPct)) : pal.TextMuted;
+                    using (var cacheBrush = new SolidBrush(cacheColor))
+                        g.DrawString(MetricFormatter.FormatCachePrecise(t.CacheHitPct), valueFont, cacheBrush, rightEdge, ty, rightFmt);
                 }
             }
 
@@ -1583,7 +1594,7 @@ namespace CodexInputUsage
                     g.FillPath(tb, tp);
 
                 int maxScroll = Math.Max(1, count - vis);
-                int thumbH = Math.Max(22, (int)Math.Round(trackH * (vis / (double)count)));
+                int thumbH = Math.Min(trackH, Math.Max(12, (int)Math.Round(trackH * (vis / (double)count))));
                 int thumbTop = rowsStartY + (int)Math.Round((trackH - thumbH) * (scrollOffset / (double)maxScroll));
                 scrollThumbRect = new Rectangle(scrollTrackRect.X, thumbTop, 6, thumbH);
                 using (var thp = StripForm.CreateRoundedPath(scrollThumbRect, 3))
