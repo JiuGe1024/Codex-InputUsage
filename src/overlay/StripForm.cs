@@ -559,14 +559,16 @@ namespace CodexInputUsage
             MetricTier leadTier = slot.Kind == SlotKind.Quota ? model.QuotaPillTier
                 : (slot.Tail != null ? model.TurnCacheTier : model.SessionCacheTier);
             MetricTier frameTier = leadTier == MetricTier.Muted && slot.Tail != null ? model.SessionCacheTier : leadTier;
-            Color tint = tokens ? (dark ? Color.White : Color.FromArgb(15, 23, 42)) : StripTierColor(palette, frameTier);
-            int fillAlpha = tokens ? (dark ? 24 : 14) : (dark ? 34 : 24);
-            int borderAlpha = tokens ? (dark ? 46 : 34) : (dark ? 78 : 62);
+            Color tint = tokens ? (dark ? Color.FromArgb(96, 165, 250) : Color.FromArgb(37, 99, 235))
+                : StripTierColor(palette, frameTier);
+            Color tokenText = dark ? Color.FromArgb(147, 197, 253) : Color.FromArgb(37, 99, 235);
+            int fillAlpha = tokens ? (dark ? 31 : 21) : (dark ? 34 : 24);
+            int borderAlpha = tokens ? (dark ? 64 : 54) : (dark ? 78 : 62);
 
             using (var path = CreateRoundedPath(slot.Bounds, 5))
             using (var fill = new SolidBrush(Color.FromArgb(fillAlpha, tint)))
             using (var border = new Pen(Color.FromArgb(borderAlpha, tint)))
-            using (var lead = new SolidBrush(tokens ? palette.StripText : StripTierColor(palette, leadTier)))
+            using (var lead = new SolidBrush(tokens ? tokenText : StripTierColor(palette, leadTier)))
             {
                 g.FillPath(fill, path);
                 g.DrawPath(border, path);
@@ -576,7 +578,7 @@ namespace CodexInputUsage
                 {
                     x += slot.LeadWidth;
                     g.DrawString(model.Slash, font, muted, x, textY, fmt);
-                    using (var tail = new SolidBrush(tokens ? palette.StripText : StripTierColor(palette, model.SessionCacheTier)))
+                    using (var tail = new SolidBrush(tokens ? tokenText : StripTierColor(palette, model.SessionCacheTier)))
                         g.DrawString(slot.Tail, font, tail, x + slot.SlashWidth, textY, fmt);
                 }
             }
