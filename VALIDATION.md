@@ -43,5 +43,19 @@
   - 详情面板标题栏模型徽标 + 钉住按钮、顶部「当前会话 / 今日与 7 日汇总」双 Tab、2×2 卡片（含均速与两位小数缓存率）、独立双列实时额度卡、十通道分段条与 2×5 清单、带拖拽滚动条及底部精确明细条的逐轮表排版对齐正常。
 - 用户实机交互验收：用户已确认原生启动、停靠外观、对话切换、TPS 速度、本轮缓存率、十通道上下文、响应优化，以及新增的「今日与 7 日汇总」Tab 与常驻条右键显示项微调均体验正常。
 
+### 7. 额度重置、DPI 与弹窗圆角
+
+- 在仓库根目录运行 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/Build-OverlayPrototype.ps1`，退出码 0，编译器 0 错误、0 警告。产物为 178,176 字节。
+- `work/selftest-report.txt` 中，已有会话匹配与设置检查继续通过。新增 `quota_reset_tests future=True reset=True missing=True`。模拟原始用量为 14% 且重置时间到达时，常驻条输出 `[5h 100%]`，使用 `Good` 语义等级。
+- 用同一份 25 轮日志对比基线 `9b1699e` 和新版。96 DPI 下明暗常驻条与紧凑条像素相同，完整档为 `332×24`，宽度随样本数字变化。三页弹窗尺寸相同，去掉 14px 外框后内部像素相同；新版四角像素透明。
+- 目视核对四张 150% 预览，未见文字截断或重叠。
+  - `work/preview-dpi150-strip.png` 为 `498×36`。
+  - `work/preview-dpi150-session.png` 为 `810×987`。
+  - `work/preview-dpi150-turns.png` 为 `810×810`。
+  - `work/preview-dpi150-history.png` 为 `810×849`。
+- 自检 `dpi_tests logicalHit=True workArea=True`。离屏模拟在 100%、125%、150%、200% 分别验证了窗口范围、圆角区域、页签点击、逐轮滚轮与拖动、受限视口滚动及末行命中。记录在 `work/dpi-qa-20261122-201132/dpi-interaction-check.txt`。
+- 正式产物已启动，日志确认新版浮层进程识别了 Codex。只替换了 InputUsage 浮层进程。
+
 ## 未在本终端执行的验证边界
-- 受限于代理终端隔离桌面 `exebox-...`，高 DPI 多屏缩放尚未在终端自动化复测；交互类功能均由用户在真实交互桌面完成验收。
+
+- 真实高 DPI 显示器上的停靠、异 DPI 双屏拖移与弹窗实机点击尚未复测。本轮的高 DPI 数据来自离屏渲染与模拟输入。

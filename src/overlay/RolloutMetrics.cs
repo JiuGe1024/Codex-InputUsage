@@ -202,18 +202,36 @@ namespace CodexInputUsage
             return MetricTier.Danger;
         }
 
+        private static readonly DateTime UnixEpochUtc = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
+        internal static bool IsQuotaWindowReset(long? resetsAtUnix, DateTime utcNow)
+        {
+            return resetsAtUnix > 0 && resetsAtUnix <= (utcNow - UnixEpochUtc).TotalSeconds;
+        }
+
+        internal static double? ResolveQuotaRemainingPct(double? usedPct, long? resetsAtUnix, DateTime utcNow)
+        {
+            if (!usedPct.HasValue) return null;
+            return IsQuotaWindowReset(resetsAtUnix, utcNow) ? 100.0 : Math.Max(0.0, Math.Min(100.0, 100.0 - usedPct.Value));
+        }
+
         internal static string FormatResetCountdown(long? resetsAtUnix, bool isWeekly)
         {
+            return FormatResetCountdown(resetsAtUnix, isWeekly, DateTime.UtcNow);
+        }
+
+        internal static string FormatResetCountdown(long? resetsAtUnix, bool isWeekly, DateTime utcNow)
+        {
             if (!resetsAtUnix.HasValue || resetsAtUnix.Value <= 0) return string.Empty;
-            DateTime epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
-            DateTime resetUtc = epoch.AddSeconds(resetsAtUnix.Value);
-            TimeSpan diff = resetUtc - DateTime.UtcNow;
-            if (diff.TotalSeconds <= 0) return "已重置";
+            if (IsQuotaWindowReset(resetsAtUnix, utcNow)) return "已重置";
+            if (resetsAtUnix.Value > 253402300799L) return string.Empty;
+            DateTime resetUtc = UnixEpochUtc.AddSeconds(resetsAtUnix.Value);
+            TimeSpan diff = resetUtc - utcNow;
             if (!isWeekly || diff.TotalHours < 24.0)
             {
-                int totalMins = Math.Max(1, (int)Math.Ceiling(diff.TotalMinutes));
-                int h = totalMins / 60;
-                int m = totalMins % 60;
+                long totalMins = Math.Max(1, (long)Math.Ceiling(diff.TotalMinutes));
+                long h = totalMins / 60;
+                long m = totalMins % 60;
                 if (h <= 0) return string.Format("{0}m 后重置", m);
                 if (m == 0) return string.Format("{0}h 后重置", h);
                 return string.Format("{0}h {1}m 后重置", h, m);

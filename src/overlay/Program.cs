@@ -341,6 +341,24 @@ namespace CodexInputUsage
             bool guardOk = !onlyOne.Toggle("quota5h") && onlyOne.ShowQuota5h;
             var quota5hPrefs = new StripSlotPreferences { ShowQuota5h = true };
             var quota5hVars = StripRenderModel.BuildVariants(snap, quota5hPrefs);
+            var quotaNow = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+            const long quotaNowUnix = 1767225600;
+            var quotaSample = new SessionMetricsSnapshot { PrimaryUsedPct = 14, PrimaryResetsAt = quotaNowUnix + 60 };
+            bool quotaFuture = MetricFormatter.ResolveQuotaRemainingPct(14, quotaSample.PrimaryResetsAt, quotaNow) == 86
+                && StripRenderModel.BuildVariants(quotaSample, quota5hPrefs, quotaNow)[0].QuotaPillText == "5h 86%";
+            quotaSample.PrimaryResetsAt = quotaNowUnix;
+            var resetPill = StripRenderModel.BuildVariants(quotaSample, quota5hPrefs, quotaNow)[0];
+            bool quotaReset = MetricFormatter.ResolveQuotaRemainingPct(14, quotaNowUnix, quotaNow) == 100
+                && MetricFormatter.ResolveQuotaRemainingPct(50, quotaNowUnix - 1, quotaNow) == 100
+                && MetricFormatter.FormatResetCountdown(quotaSample.PrimaryResetsAt, false, quotaNow) == "已重置"
+                && MetricFormatter.FormatResetCountdown(quotaSample.PrimaryResetsAt, true, quotaNow) == "已重置"
+                && resetPill.QuotaPillText == "5h 100%" && resetPill.QuotaPillTier == MetricTier.Good;
+            quotaSample.PrimaryUsedPct = null;
+            var missingPill = StripRenderModel.BuildVariants(quotaSample, quota5hPrefs, quotaNow)[0];
+            bool quotaMissing = !MetricFormatter.ResolveQuotaRemainingPct(null, quotaNowUnix, quotaNow).HasValue
+                && missingPill.QuotaPillText == "5h --" && missingPill.QuotaPillTier == MetricTier.Muted;
+            sb.AppendLine(string.Format("quota_reset_tests future={0} reset={1} missing={2} normalizedStrip={3}",
+                quotaFuture, quotaReset, quotaMissing, resetPill.Describe()));
             var customVars = StripRenderModel.BuildVariants(snap, loadedPrefs);
             sb.AppendLine(string.Format("settings_test roundTrip={0} guardLastSlot={1} quota5hStrip=\"{2}\" noTpsStrip=\"{3}\"",
                 roundTripOk, guardOk,
@@ -400,7 +418,42 @@ namespace CodexInputUsage
             using (var bmp = DetailPopoverForm.RenderHistoryPreviewBitmap(snap, hist, ThemePalette.Dark))
                 bmp.Save(Path.Combine(workDir, "preview-detail-history-dark.png"), ImageFormat.Png);
 
+            const float dpi150 = 1.5f;
+            using (var bmp = StripForm.RenderPreviewBitmap(variants[0], ThemePalette.Light, false, true, dpi150))
+                SaveDpiPreview(bmp, "strip", workDir, sb);
+            using (var bmp = DetailPopoverForm.RenderPreviewBitmap(snap, ThemePalette.Light, PopoverTab.Session, dpi150))
+                SaveDpiPreview(bmp, "session", workDir, sb);
+            using (var bmp = DetailPopoverForm.RenderPreviewBitmap(snap, ThemePalette.Light, PopoverTab.Turns, dpi150))
+                SaveDpiPreview(bmp, "turns", workDir, sb);
+            using (var bmp = DetailPopoverForm.RenderHistoryPreviewBitmap(snap, hist, ThemePalette.Light, dpi150))
+                SaveDpiPreview(bmp, "history", workDir, sb);
+
+            bool dpiHit = true, dpiBounds = true;
+            foreach (float scale in new[] { 1f, 1.25f, 1.5f, 2f })
+            {
+                var workArea = new Rectangle(-1920, 0, 1920, 1040);
+                var bottomAnchor = new Rectangle(-1880, 980, 300, 40);
+                var topAnchor = new Rectangle(-410, 10, 300, 40);
+                var bottomPopup = DetailPopoverForm.CalculateBounds(bottomAnchor, workArea, 680, scale);
+                var topPopup = DetailPopoverForm.CalculateBounds(topAnchor, workArea, 680, scale);
+                dpiBounds &= workArea.Contains(bottomPopup) && workArea.Contains(topPopup)
+                    && bottomPopup.Bottom <= bottomAnchor.Top && topPopup.Top >= topAnchor.Bottom
+                    && bottomPopup.Width == OverlayDpi.Pixels(540, scale);
+                var logical = new Rectangle(120, 80, 40, 24);
+                dpiHit &= logical.Contains(OverlayDpi.ToLogical(new Point(
+                    OverlayDpi.Pixels(140, scale), OverlayDpi.Pixels(92, scale)), scale))
+                    && !logical.Contains(OverlayDpi.ToLogical(new Point(
+                    OverlayDpi.Pixels(160, scale), OverlayDpi.Pixels(92, scale)), scale));
+            }
+            sb.AppendLine(string.Format("dpi_tests logicalHit={0} workArea={1}", dpiHit, dpiBounds));
             File.WriteAllText(Path.Combine(workDir, "selftest-report.txt"), sb.ToString(), Encoding.UTF8);
+            if (!quotaFuture || !quotaReset || !quotaMissing || !dpiHit || !dpiBounds) Environment.ExitCode = 1;
+        }
+
+        private static void SaveDpiPreview(Bitmap bitmap, string name, string workDir, StringBuilder report)
+        {
+            bitmap.Save(Path.Combine(workDir, "preview-dpi150-" + name + ".png"), ImageFormat.Png);
+            report.AppendLine("dpi150_" + name + "_px=" + bitmap.Width + "x" + bitmap.Height);
         }
 
         internal static void InitDiagPaths()
@@ -534,6 +587,7 @@ namespace CodexInputUsage
             private Rectangle _lastStripBounds = Rectangle.Empty;
             private Rectangle _anchorWindowRect = Rectangle.Empty;
             private Rectangle _anchorStripBounds = Rectangle.Empty;
+            private float _anchorDpiScale = 1f;
             private DateTime _lastMetricsPollUtc = DateTime.MinValue;
             private DateTime _lastCodexPresenceCheckUtc = DateTime.MinValue;
             private DateTime _lastHeartbeatUtc = DateTime.MinValue;
@@ -665,6 +719,11 @@ namespace CodexInputUsage
 
                 Rectangle curWin = NativeWin32.GetWindowRectangle(hwnd);
                 if (curWin.IsEmpty) return;
+                if (NativeWin32.GetWindowDpiScale(hwnd) != _anchorDpiScale)
+                {
+                    _dockTracker.WakeNow(true, false);
+                    return;
+                }
 
                 if (curWin.Size == _anchorWindowRect.Size)
                 {
@@ -777,7 +836,7 @@ namespace CodexInputUsage
                     ThemePalette pal = ThemePalette.For(CodexThemeSource.Current);
                     if (_popover.ActiveTab == PopoverTab.History)
                         _popover.UpdateHistoryData(_historyReader.GetSnapshot(true));
-                    _popover.UpdateData(_lastMetrics, pal, _lastStripBounds);
+                    _popover.UpdateData(_lastMetrics, pal, _lastStripBounds, _anchorDpiScale);
                     if (!_popover.Visible) _popover.Show();
                     _popover.PositionAbove(_lastStripBounds);
                 }
@@ -891,6 +950,12 @@ namespace CodexInputUsage
                     return;
                 }
 
+                if (dock.DpiScale != NativeWin32.GetWindowDpiScale(fgCodex))
+                {
+                    _dockTracker.WakeNow(true, false);
+                    return;
+                }
+
                 // Adjust cached dock snapshot instantly if Codex was moved while in the background
                 Rectangle liveWinRect = NativeWin32.GetWindowRectangle(fgCodex);
                 ComposerDockSnapshot effectiveDock = dock;
@@ -903,6 +968,7 @@ namespace CodexInputUsage
                         effectiveDock = new ComposerDockSnapshot
                         {
                             WindowHandle = dock.WindowHandle,
+                            DpiScale = dock.DpiScale,
                             Source = dock.Source,
                             ReferenceRect = OffsetRect(dock.ReferenceRect, dx, dy),
                             RowRect = OffsetRect(dock.RowRect, dx, dy),
@@ -966,6 +1032,7 @@ namespace CodexInputUsage
                 _lastStripBounds = placed;
                 _anchorWindowRect = effectiveDock.WindowRect;
                 _anchorStripBounds = placed;
+                _anchorDpiScale = effectiveDock.DpiScale;
 
                 LogState(string.Format("docked:{0} bounds={1} text=\"{2}\" thread={3}({4}) match=[{5}]",
                     effectiveDock.Source, placed, variant, MetricFormatter.ShortThreadId(_lastMetrics.ThreadId),
@@ -975,7 +1042,7 @@ namespace CodexInputUsage
                 {
                     if (_popover.ActiveTab == PopoverTab.History)
                         _popover.UpdateHistoryData(_historyReader.GetSnapshot(false));
-                    _popover.UpdateData(_lastMetrics, pal, placed);
+                    _popover.UpdateData(_lastMetrics, pal, placed, _anchorDpiScale);
                     if (!_popover.Visible) _popover.Show();
                 }
 

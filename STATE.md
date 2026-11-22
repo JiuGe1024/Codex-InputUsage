@@ -4,7 +4,7 @@
 
 ## 核心架构（无 CDP 路线）
 
-产物 `outputs/Codex-InputUsage-Overlay.exe`（.NET Framework 4.x `csc.exe` 零外部依赖构建，170 KB）随 Windows 原生 Microsoft Store 版 Codex Desktop 伴随运行，源码全部位于 `src/overlay/`：
+产物 `outputs/Codex-InputUsage-Overlay.exe`（.NET Framework 4.x `csc.exe` 零外部依赖构建）随 Windows 原生 Microsoft Store 版 Codex Desktop 伴随运行，源码全部位于 `src/overlay/`：
 
 | 模块 | 职责 |
 |---|---|
@@ -21,6 +21,12 @@
 | `src/overlay/DetailPopoverForm.cs` | 点击状态条在上方展开监控卡片（`540px` 宽、`WS_EX_NOACTIVATE`）：顶部带矢量图标的「当前会话 / 逐轮明细 / 今日与 7 日汇总」三页签切换、标题栏模型徽标与「钉住」开关、点击外部/`Esc` 自动收起；会话页含 2×2 指标卡（输出速度与会话平均速度并列）、双列实时额度卡与十通道上下文卡；逐轮明细页含模型/速度/首字/上下文-思考-正文/Token 消耗/缓存表格与可拖拽滚动条；汇总页含今日/7 日双卡、可悬停查精确值的 7 日柱状图、按模型分布与近 7 日 Top 5 会话 |
 | `src/overlay/CodexTheme.cs` | 读取 `~/.codex/config.toml` 的 `appearanceTheme`（回退系统主题），提供明暗双主题与十通道上下文色板 |
 | `src/overlay/Program.cs` | 协调所有子系统、单实例互斥锁、系统托盘、`FileSystemWatcher` rollout 实时监听、`--exit-with-codex` 自动退出与 `--self-test` 自检 |
+
+## 额度显示与 DPI
+
+- 常驻条与详情额度卡共用 `MetricFormatter` 的归一化规则。已有用量且重置时间到达时显示 `100%`，详情显示「已重置」。原始用量与重置时间继续保留，缺用量时显示 `--`。
+- 常驻条、三页签弹窗和 UIA 定位边距按宿主 Codex 窗口 DPI 缩放。内部布局与命中检测使用 96 DPI 逻辑坐标，窗口、UIA 矩形和外部点击使用物理像素。宿主 DPI 变化时重新测量并重绘。
+- 弹窗使用 12 DIP 外圆角。高度受限时，当前会话和汇总保留顶部页签并允许滚动正文，逐轮页按可用高度减少可见行数。极窄工作区容不下完整宽度时，弹窗按可用宽度等比收缩。
 
 ## 原生伴随启动机制
 

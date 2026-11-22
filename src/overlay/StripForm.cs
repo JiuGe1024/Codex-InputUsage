@@ -43,7 +43,7 @@ namespace CodexInputUsage
             return BuildVariants(snap, null);
         }
 
-        internal static StripRenderModel[] BuildVariants(SessionMetricsSnapshot snap, StripSlotPreferences prefs)
+        internal static StripRenderModel[] BuildVariants(SessionMetricsSnapshot snap, StripSlotPreferences prefs, DateTime? utcNow = null)
         {
             var p = prefs ?? new StripSlotPreferences();
             if (!p.AnyEnabled()) p = new StripSlotPreferences();
@@ -65,9 +65,11 @@ namespace CodexInputUsage
             MetricTier quota5hTier = MetricTier.Muted;
             if (p.ShowQuota5h)
             {
-                if (snap != null && snap.PrimaryUsedPct.HasValue)
+                double? remaining = snap == null ? null : MetricFormatter.ResolveQuotaRemainingPct(
+                    snap.PrimaryUsedPct, snap.PrimaryResetsAt, utcNow ?? DateTime.UtcNow);
+                if (remaining.HasValue)
                 {
-                    double rem = Math.Max(0.0, Math.Min(100.0, 100.0 - snap.PrimaryUsedPct.Value));
+                    double rem = remaining.Value;
                     quota5hText = string.Format(CultureInfo.InvariantCulture, "5h {0}%", (int)Math.Round(rem));
                     quota5hTier = MetricFormatter.ClassifyQuotaRemaining(rem);
                 }
@@ -185,6 +187,8 @@ namespace CodexInputUsage
         private bool _hovered;
         private bool _popoverOpen;
         private bool _allowShow;
+        private float _dpiScale = 1f;
+        private int _logicalWidth;
         private Rectangle _targetBounds = Rectangle.Empty;
         private ToolStripMenuItem _autoStartItem;
         private ToolStripMenuItem _slotTpsItem;
@@ -294,6 +298,8 @@ namespace CodexInputUsage
                 m.Result = (IntPtr)MaNoActivate;
                 return;
             }
+            // ApplyDockedState sizes the layered surface from the host's DPI.
+            if (m.Msg == OverlayDpi.WmDpiChanged) return;
             base.WndProc(ref m);
         }
 
@@ -355,31 +361,36 @@ namespace CodexInputUsage
             }
 
             StripRenderModel[] variants = StripRenderModel.BuildVariants(metrics, slotPrefs);
+            float scale = dock.DpiScale;
+            int height = OverlayDpi.Pixels(StripHeightPx, scale);
+            int gap = OverlayDpi.Pixels(10, scale);
+            var work = Screen.FromHandle(dock.WindowHandle).WorkingArea;
             int rightEdge;
             if (dock.Source == DockSourceKind.UiaContext)
-                rightEdge = dock.ReferenceRect.Left - 10;
+                rightEdge = dock.ReferenceRect.Left - gap;
             else if (dock.Source == DockSourceKind.UiaModel)
-                rightEdge = dock.ReferenceRect.Left - 34;
+                rightEdge = dock.ReferenceRect.Left - OverlayDpi.Pixels(34, scale);
             else
-                rightEdge = dock.ComposerRect.Right - 220;
+                rightEdge = dock.ComposerRect.Right - OverlayDpi.Pixels(220, scale);
 
-            int minLeft = Math.Max(dock.ComposerRect.Left + 10, dock.LeftBarrierX + 10);
+            rightEdge = Math.Min(rightEdge, work.Right);
+            int minLeft = Math.Max(work.Left, Math.Max(dock.ComposerRect.Left, dock.LeftBarrierX) + gap);
             int maxWidth = rightEdge - minLeft;
-            if (maxWidth < 50)
+            if (maxWidth < OverlayDpi.Pixels(50, scale) || work.Height < height)
             {
                 HideStrip();
                 return false;
             }
 
             StripRenderModel selected = null;
-            int selectedWidth = 0;
+            int logicalWidth = 0;
             for (int i = 0; i < variants.Length; i++)
             {
                 int w = MeasureModelWidth(variants[i]);
-                if (w <= maxWidth)
+                if (OverlayDpi.Pixels(w, scale) <= maxWidth)
                 {
                     selected = variants[i];
-                    selectedWidth = w;
+                    logicalWidth = w;
                     break;
                 }
             }
@@ -390,22 +401,22 @@ namespace CodexInputUsage
                 return false;
             }
 
-            int x = rightEdge - selectedWidth;
-            int y = dock.RowCenterY - (StripHeightPx / 2);
-            var work = Screen.FromHandle(dock.WindowHandle).WorkingArea;
-            if (y < work.Top) y = work.Top;
-            if (y + StripHeightPx > work.Bottom) y = work.Bottom - StripHeightPx;
-            if (x < work.Left) x = work.Left;
+            int width = OverlayDpi.Pixels(logicalWidth, scale);
+            int x = rightEdge - width;
+            int y = Math.Max(work.Top, Math.Min(dock.RowCenterY - height / 2, work.Bottom - height));
 
-            Rectangle nextBounds = new Rectangle(x, y, selectedWidth, StripHeightPx);
+            Rectangle nextBounds = new Rectangle(x, y, width, height);
             string nextKey = selected.Describe() + "|" + (int)selected.TurnCacheTier + "|" + (int)selected.SessionCacheTier + "|" + (int)selected.QuotaPillTier;
             bool needRepaint = !string.Equals(_modelKey, nextKey, StringComparison.Ordinal)
                 || _palette != palette
+                || _dpiScale != scale
                 || _targetBounds.Size != nextBounds.Size
                 || !Visible;
             bool moved = _targetBounds != nextBounds;
 
             _palette = palette;
+            _dpiScale = scale;
+            _logicalWidth = logicalWidth;
             _model = selected;
             _modelKey = nextKey;
             _targetBounds = nextBounds;
@@ -473,10 +484,10 @@ namespace CodexInputUsage
             if (Visible) Hide();
         }
 
-        internal static Bitmap RenderPreviewBitmap(StripRenderModel model, ThemePalette palette, bool hovered, bool includeBackdrop)
+        internal static Bitmap RenderPreviewBitmap(StripRenderModel model, ThemePalette palette, bool hovered, bool includeBackdrop, float scale = 1f)
         {
             int width = MeasureModelWidth(model);
-            var bmp = new Bitmap(width, StripHeightPx, PixelFormat.Format32bppPArgb);
+            var bmp = new Bitmap(OverlayDpi.Pixels(width, scale), OverlayDpi.Pixels(StripHeightPx, scale), PixelFormat.Format32bppPArgb);
             using (var g = Graphics.FromImage(bmp))
             {
                 if (includeBackdrop)
@@ -489,6 +500,7 @@ namespace CodexInputUsage
                 {
                     g.Clear(Color.Transparent);
                 }
+                g.ScaleTransform(scale, scale);
                 DrawStripContent(g, new Size(width, StripHeightPx), model, palette, hovered);
             }
             return bmp;
@@ -504,7 +516,8 @@ namespace CodexInputUsage
                 using (var g = Graphics.FromImage(bmp))
                 {
                     g.Clear(Color.Transparent);
-                    DrawStripContent(g, _targetBounds.Size, _model, _palette, _hovered || _popoverOpen);
+                    g.ScaleTransform(_dpiScale, _dpiScale);
+                    DrawStripContent(g, new Size(_logicalWidth, StripHeightPx), _model, _palette, _hovered || _popoverOpen);
                 }
                 BlitLayeredBitmap(bmp, _targetBounds.Location, _targetBounds.Size);
             }
@@ -536,8 +549,8 @@ namespace CodexInputUsage
 
             if (model == null) return;
 
-            using (var textFont = new Font("Microsoft YaHei UI", 8.8f, FontStyle.Regular, GraphicsUnit.Point))
-            using (var pillFont = new Font("Segoe UI Semibold", 8.5f, FontStyle.Regular, GraphicsUnit.Point))
+            using (var textFont = OverlayDpi.FontAt96Dpi("Microsoft YaHei UI", 8.8f, FontStyle.Regular))
+            using (var pillFont = OverlayDpi.FontAt96Dpi("Segoe UI Semibold", 8.5f, FontStyle.Regular))
             using (var mainBrush = new SolidBrush(palette.StripText))
             using (var mutedBrush = new SolidBrush(palette.StripTextSecondary))
             using (var fmt = (StringFormat)StringFormat.GenericTypographic.Clone())
@@ -685,8 +698,8 @@ namespace CodexInputUsage
             if (model == null) return 0;
             using (var bmp = new Bitmap(1, 1, PixelFormat.Format32bppPArgb))
             using (var g = Graphics.FromImage(bmp))
-            using (var textFont = new Font("Microsoft YaHei UI", 8.8f, FontStyle.Regular, GraphicsUnit.Point))
-            using (var pillFont = new Font("Segoe UI Semibold", 8.5f, FontStyle.Regular, GraphicsUnit.Point))
+            using (var textFont = OverlayDpi.FontAt96Dpi("Microsoft YaHei UI", 8.8f, FontStyle.Regular))
+            using (var pillFont = OverlayDpi.FontAt96Dpi("Segoe UI Semibold", 8.5f, FontStyle.Regular))
             using (var fmt = (StringFormat)StringFormat.GenericTypographic.Clone())
             {
                 g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;

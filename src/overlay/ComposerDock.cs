@@ -22,6 +22,7 @@ namespace CodexInputUsage
     internal sealed class ComposerDockSnapshot
     {
         internal IntPtr WindowHandle;
+        internal float DpiScale = 1f;
         internal DockSourceKind Source;
         internal Rectangle ReferenceRect;
         internal Rectangle RowRect;
@@ -46,7 +47,7 @@ namespace CodexInputUsage
             {
                 if (!RowRect.IsEmpty) return RowRect.Top + (RowRect.Height / 2);
                 if (!ReferenceRect.IsEmpty) return ReferenceRect.Top + (ReferenceRect.Height / 2);
-                return ComposerRect.Bottom - 22;
+                return ComposerRect.Bottom - OverlayDpi.Pixels(22, DpiScale);
             }
         }
     }
@@ -86,6 +87,21 @@ namespace CodexInputUsage
 
         [DllImport("user32.dll")] internal static extern bool SetProcessDpiAwarenessContext(IntPtr context);
         [DllImport("user32.dll")] internal static extern uint GetDpiForSystem();
+        [DllImport("user32.dll")] private static extern uint GetDpiForWindow(IntPtr hwnd);
+
+        internal static float GetWindowDpiScale(IntPtr hwnd)
+        {
+            uint dpi = 0;
+            if (hwnd != IntPtr.Zero)
+            {
+                try { dpi = GetDpiForWindow(hwnd); } catch (EntryPointNotFoundException) { }
+            }
+            if (dpi == 0)
+            {
+                try { dpi = GetDpiForSystem(); } catch (EntryPointNotFoundException) { }
+            }
+            return dpi == 0 ? 1f : Math.Max(1f, dpi / 96f);
+        }
         [DllImport("user32.dll")] internal static extern IntPtr GetForegroundWindow();
         [DllImport("user32.dll")] internal static extern bool IsIconic(IntPtr hwnd);
         [DllImport("user32.dll")] internal static extern bool IsWindowVisible(IntPtr hwnd);
@@ -382,18 +398,19 @@ namespace CodexInputUsage
                                 if (curSnap != null && curSnap.WindowHandle == hwnd)
                                 {
                                     Rectangle winRect = NativeWin32.GetWindowRectangle(hwnd);
-                                    if (winRect != curSnap.WindowRect)
+                                    if (winRect != curSnap.WindowRect || NativeWin32.GetWindowDpiScale(hwnd) != curSnap.DpiScale)
                                     {
                                         needFullWalk = true;
                                     }
                                     else if (requestedFp || (DateTime.UtcNow - lastFingerprintUtc).TotalMilliseconds >= 300.0)
                                     {
                                         string[] hdrs, bodies;
-                                        CollectChatFingerprints(hwnd, winRect, curSnap.ComposerRect, out hdrs, out bodies);
+                                        CollectChatFingerprints(hwnd, winRect, curSnap.ComposerRect, curSnap.DpiScale, out hdrs, out bodies);
                                         lastFingerprintUtc = DateTime.UtcNow;
                                         _latest = new ComposerDockSnapshot
                                         {
                                             WindowHandle = curSnap.WindowHandle,
+                                            DpiScale = curSnap.DpiScale,
                                             Source = curSnap.Source,
                                             ReferenceRect = curSnap.ReferenceRect,
                                             RowRect = curSnap.RowRect,
@@ -428,6 +445,7 @@ namespace CodexInputUsage
                             && prevSnap.WindowHandle == hwnd
                             && (prevSnap.Source == DockSourceKind.UiaContext || prevSnap.Source == DockSourceKind.UiaModel)
                             && prevSnap.WindowRect == snap.WindowRect
+                            && prevSnap.DpiScale == snap.DpiScale
                             && (DateTime.UtcNow - lastFullWalkUtc).TotalMilliseconds < 1200.0;
 
                         if (!degraded)
@@ -435,7 +453,7 @@ namespace CodexInputUsage
                             if (!snap.ComposerRect.IsEmpty && !snap.WindowRect.IsEmpty)
                             {
                                 string[] hdrs, bodies;
-                                CollectChatFingerprints(hwnd, snap.WindowRect, snap.ComposerRect, out hdrs, out bodies);
+                                CollectChatFingerprints(hwnd, snap.WindowRect, snap.ComposerRect, snap.DpiScale, out hdrs, out bodies);
                                 snap.HeaderTexts = hdrs;
                                 snap.BodyTexts = bodies;
                                 lastFingerprintUtc = DateTime.UtcNow;
@@ -468,6 +486,7 @@ namespace CodexInputUsage
         {
             Rectangle winRect = NativeWin32.GetWindowRectangle(hwnd);
             if (winRect.IsEmpty) return ComposerDockSnapshot.Empty;
+            float scale = NativeWin32.GetWindowDpiScale(hwnd);
 
             AutomationElement root = null;
             try { root = AutomationElement.FromHandle(hwnd); } catch { }
@@ -490,6 +509,7 @@ namespace CodexInputUsage
                 return new ComposerDockSnapshot
                 {
                     WindowHandle = hwnd,
+                    DpiScale = scale,
                     Source = DockSourceKind.None,
                     WindowRect = winRect,
                     Detail = "no-prosemirror-composer"
@@ -560,7 +580,7 @@ namespace CodexInputUsage
 
             // 3. Determine toolbar row vertical band and left-cluster barrier
             Rectangle rowRect = !modelRect.IsEmpty ? modelRect : contextRect;
-            int rowTop = !rowRect.IsEmpty ? rowRect.Top : (composerRect.Bottom - 36);
+            int rowTop = !rowRect.IsEmpty ? rowRect.Top : (composerRect.Bottom - OverlayDpi.Pixels(36, scale));
             int rowBottom = !rowRect.IsEmpty ? rowRect.Bottom : composerRect.Bottom;
             if (!contextRect.IsEmpty && !modelRect.IsEmpty)
             {
@@ -570,9 +590,9 @@ namespace CodexInputUsage
 
             int rightAnchorLeft = !contextRect.IsEmpty
                 ? contextRect.Left
-                : (!modelRect.IsEmpty ? modelRect.Left : (composerRect.Right - 220));
+                : (!modelRect.IsEmpty ? modelRect.Left : (composerRect.Right - OverlayDpi.Pixels(220, scale)));
 
-            int leftBarrier = composerRect.Left + 12;
+            int leftBarrier = composerRect.Left + OverlayDpi.Pixels(12, scale);
             for (int i = 0; i < children.Count; i++)
             {
                 var c = children[i];
@@ -606,6 +626,7 @@ namespace CodexInputUsage
             return new ComposerDockSnapshot
             {
                 WindowHandle = hwnd,
+                DpiScale = scale,
                 Source = source,
                 ReferenceRect = refRect,
                 RowRect = !modelRect.IsEmpty ? modelRect : contextRect,
@@ -621,6 +642,7 @@ namespace CodexInputUsage
             IntPtr hwnd,
             Rectangle winRect,
             Rectangle composerRect,
+            float scale,
             out string[] headerTexts,
             out string[] bodyTexts)
         {
@@ -649,14 +671,14 @@ namespace CodexInputUsage
                 // Chat header sits in the top title bar (y <= winTop + 88), strictly above the sidebar thread list.
                 // Estimate main pane left edge from composer symmetry so both sidebar-open and collapsed layouts work.
                 int mainPaneLeft = Math.Max(winRect.Left, (composerRect.Left + composerRect.Right) - winRect.Right);
-                int headerMinX = mainPaneLeft > winRect.Left + 140
-                    ? Math.Max(winRect.Left + 180, mainPaneLeft - 24)
-                    : (winRect.Left + 60);
-                int headerMaxY = winRect.Top + 88;
-                int bodyMinX = composerRect.Left - 80;
-                int bodyMaxX = composerRect.Right + 80;
-                int bodyMinY = winRect.Top + 70;
-                int bodyMaxY = composerRect.Top - 6;
+                int headerMinX = mainPaneLeft > winRect.Left + OverlayDpi.Pixels(140, scale)
+                    ? Math.Max(winRect.Left + OverlayDpi.Pixels(180, scale), mainPaneLeft - OverlayDpi.Pixels(24, scale))
+                    : winRect.Left + OverlayDpi.Pixels(60, scale);
+                int headerMaxY = winRect.Top + OverlayDpi.Pixels(88, scale);
+                int bodyMinX = composerRect.Left - OverlayDpi.Pixels(80, scale);
+                int bodyMaxX = composerRect.Right + OverlayDpi.Pixels(80, scale);
+                int bodyMinY = winRect.Top + OverlayDpi.Pixels(70, scale);
+                int bodyMaxY = composerRect.Top - OverlayDpi.Pixels(6, scale);
 
                 var headers = new List<Tuple<int, string>>();
                 var bodies = new List<Tuple<int, string>>();
