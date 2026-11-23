@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
@@ -60,6 +60,9 @@ namespace CodexInputUsage
                 && total.Tokens == total.UncachedInputTokens + total.CachedInputTokens + total.ReasoningTokens + total.OutputTokens + total.UnbrokenTokens
                 && total.CacheHitPct == 60 && week.Points.Sum(point => point.Totals.Tokens) == total.Tokens
                 && week.Models.Single(model => model.Key == "6.2sol").Value.Tokens == 170
+                && week.Points.Last().ModelTokens["6Astra"] == 120
+                && week.Points.Last().ModelTokens["6.2sol"] == 50
+                && week.Points.All(point => point.ModelTokens.Values.Sum() == point.Totals.Tokens)
                 && week.TopThreads.Length == 2 && week.AllTimeTokens == 890
                 && all.Points.First(point => point.Totals.Tokens == 600).Totals.CacheHitPct == null;
             bool curves = CheckCurves();

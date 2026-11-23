@@ -70,6 +70,7 @@ namespace CodexInputUsage
         internal DateTime StartLocal, EndLocal;
         internal string AxisLabel, TooltipLabel;
         internal readonly UsageTotals Totals = new UsageTotals();
+        internal readonly Dictionary<string, long> ModelTokens = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
     }
 
     internal sealed class TopThreadItem
@@ -232,10 +233,14 @@ namespace CodexInputUsage
                 if (time >= snap.Points[mid].EndLocal) left = mid + 1;
                 else right = mid;
             }
-            snap.Points[left].Totals.Add(id, tokens, usage);
+            var point = snap.Points[left];
+            point.Totals.Add(id, tokens, usage);
             snap.Total.Add(id, tokens, usage);
             string key = MetricFormatter.FormatModelName(model);
             if (key.Length == 0) key = "未知模型";
+            long pointModelTokens;
+            point.ModelTokens.TryGetValue(key, out pointModelTokens);
+            point.ModelTokens[key] = pointModelTokens + tokens;
             UsageTotals modelTotal;
             if (!models.TryGetValue(key, out modelTotal))
                 models.Add(key, modelTotal = new UsageTotals());

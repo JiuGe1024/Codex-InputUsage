@@ -205,7 +205,9 @@ namespace CodexInputUsage
             var overview = new Rectangle(Pad, y, width, UsageOverviewHeight + (view.Period == UsagePeriod.Custom ? UsageCustomHeight : 0));
             DrawUsageOverview(g, overview, view, scroll, mouse, pal, head, label, sub, hero);
             y = overview.Bottom + UsageCardGap;
-            DrawUsageTrend(g, new Rectangle(Pad, y, width, UsageChartHeight), snap, mouse, pal, head, label, sub);
+            var visibleBody = view.Viewport;
+            visibleBody.Offset(0, scroll);
+            DrawUsageTrend(g, new Rectangle(Pad, y, width, UsageChartHeight), visibleBody, snap, mouse, pal, head, label, sub, hero);
             y += UsageChartHeight + UsageCardGap;
             int modelHeight = UsageModelsHeight(snap);
             DrawUsageModels(g, new Rectangle(Pad, y, width, modelHeight), snap, pal, head, label, sub);
@@ -344,7 +346,8 @@ namespace CodexInputUsage
                 g.DrawString(value, font, text, rect, centered);
         }
 
-        private static void DrawUsageTrend(Graphics g, Rectangle card, HistoryStatsSnapshot snap, Point mouse, ThemePalette pal, Font head, Font label, Font sub)
+        private static void DrawUsageTrend(Graphics g, Rectangle card, Rectangle visibleBody, HistoryStatsSnapshot snap, Point mouse,
+            ThemePalette pal, Font head, Font label, Font sub, Font hero)
         {
             DrawSummaryCard(g, card, pal, pal.Border);
             using (var primary = new SolidBrush(pal.TextPrimary))
@@ -374,7 +377,7 @@ namespace CodexInputUsage
                     {
                         float y = plot.Bottom - i * plot.Height / 3f;
                         g.DrawLine(grid, plot.Left, y, plot.Right, y);
-                        g.DrawString(Tokens((long)Math.Round(i * ceiling / 3)), sub, secondary, plot.Left - 6, y - 7, right);
+                        g.DrawString(MetricFormatter.CompactTokensLower((long)Math.Round(i * ceiling / 3)), sub, secondary, plot.Left - 6, y - 7, right);
                     }
                     int ticks = count <= 8 ? count : 6;
                     for (int i = 0; i < ticks; i++)
@@ -406,8 +409,12 @@ namespace CodexInputUsage
                         }
                         g.FillEllipse(dot, point.X - 3, point.Y - 3, 6, 6);
                     }
-                    string tip = hover ? bin.TooltipLabel + " · " + bin.Totals.Tokens.ToString("N0") + " Token · " + UsageCount(bin.Totals)
-                        : "峰值 " + bin.TooltipLabel + " · " + Tokens(peak);
+                    if (hover)
+                    {
+                        DrawUsageHover(g, Rectangle.Intersect(card, visibleBody), point, bin, snap.Grain, pal, head, sub, hero);
+                        return;
+                    }
+                    string tip = "峰值 " + bin.TooltipLabel + " · " + MetricFormatter.CompactTokensLower(peak);
                     int w = (int)Math.Ceiling(g.MeasureString(tip, sub).Width) + 14;
                     int left = Math.Max(plot.Left, Math.Min(card.Right - w - 9, (int)point.X - w / 2));
                     int top = Math.Max(card.Top + 29, (int)point.Y - 25);
@@ -420,6 +427,82 @@ namespace CodexInputUsage
                         g.DrawPath(pen, path);
                     }
                     g.DrawString(tip, sub, primary, left + 7, top + 3);
+                }
+            }
+        }
+
+        private static void DrawUsageHover(Graphics g, Rectangle bounds, PointF point, UsageTrendPoint bin, UsageGrain grain,
+            ThemePalette pal, Font head, Font small, Font hero)
+        {
+            var totals = bin.Totals;
+            var models = bin.ModelTokens.Where(model => model.Value > 0)
+                .OrderByDescending(model => model.Value).ThenBy(model => model.Key, StringComparer.OrdinalIgnoreCase).ToList();
+            int width = 230;
+            int baseHeight = totals.UnbrokenTokens > 0 ? 97 : 81;
+            int rowCount = Math.Min(Math.Min(3, models.Count), Math.Max(0, (bounds.Height - baseHeight - 18) / 17));
+            if (rowCount > 0 && models.Count > rowCount)
+            {
+                long other = models.Skip(rowCount - 1).Sum(model => model.Value);
+                models.RemoveRange(rowCount - 1, models.Count - rowCount + 1);
+                models.Add(new KeyValuePair<string, long>("其他模型", other));
+            }
+
+            int height = baseHeight + rowCount * 17 + (rowCount > 0 ? 6 : 0);
+            if (bounds.Width < width + 12 || bounds.Height < height + 12) return;
+            int x = (int)point.X + 13;
+            if (x + width > bounds.Right - 6) x = (int)point.X - width - 13;
+            x = Math.Max(bounds.Left + 6, Math.Min(bounds.Right - width - 6, x));
+            int y = Math.Max(bounds.Top + 6, Math.Min(bounds.Bottom - height - 6, (int)point.Y + 9));
+            var rect = new Rectangle(x, y, width, height);
+            using (var path = StripForm.CreateRoundedPath(rect, 10))
+            using (var surface = new SolidBrush(pal.SurfaceBg))
+            using (var border = new Pen(pal.BorderStrong))
+            using (var primary = new SolidBrush(pal.TextPrimary))
+            using (var secondary = new SolidBrush(pal.TextSecondary))
+            using (var accent = new SolidBrush(pal.AccentBlue))
+            using (var right = new StringFormat { Alignment = StringAlignment.Far })
+            {
+                g.FillPath(surface, path);
+                g.DrawPath(border, path);
+                int left = x + 11, edge = rect.Right - 10;
+                string date = grain == UsageGrain.Day
+                    ? bin.StartLocal.ToString("M月d日（ddd）", CultureInfo.GetCultureInfo("zh-CN"))
+                    : bin.TooltipLabel;
+                g.DrawString(date, head, primary, left, y + 8);
+                string calls = totals.DetailedThreads == 0 && totals.Sessions > 0 ? "调用 —" : totals.Calls + " 次调用";
+                g.DrawString(calls, small, secondary, edge, y + 9, right);
+                g.DrawString(MetricFormatter.CompactTokensLower(totals.Tokens) + " tok", hero, accent, left - 1, y + 24);
+
+                var names = new[] { "新输入", "缓存", "输出" };
+                var tokens = new[] { totals.UncachedInputTokens, totals.CachedInputTokens, totals.OutputTokens + totals.ReasoningTokens };
+                for (int i = 0; i < names.Length; i++)
+                {
+                    int col = left + i * 70;
+                    g.DrawString(names[i], small, secondary, col, y + 48);
+                    string value = totals.DetailedThreads > 0 ? MetricFormatter.CompactTokensLower(tokens[i]) : "—";
+                    g.DrawString(value, head, primary, col, y + 62);
+                }
+
+                int line = y + 80;
+                if (totals.UnbrokenTokens > 0)
+                {
+                    g.DrawString("未拆解 " + MetricFormatter.CompactTokensLower(totals.UnbrokenTokens), small, secondary, left, line);
+                    line += 16;
+                }
+                if (rowCount > 0)
+                {
+                    g.DrawLine(border, left, line, edge, line);
+                    line += 6;
+                }
+                var colors = new[] { pal.CtxToolResults, pal.AccentBlue, pal.CtxUserInput };
+                for (int i = 0; i < rowCount; i++)
+                {
+                    var model = models[i];
+                    using (var dot = new SolidBrush(colors[i])) g.FillEllipse(dot, left, line + 5, 5, 5);
+                    DrawSummaryText(g, model.Key, small, primary, new Rectangle(left + 9, line - 1, 91, 16));
+                    g.DrawString(MetricFormatter.CompactTokensLower(model.Value), small, primary, edge - 55, line, right);
+                    g.DrawString(Percent(model.Value * 100.0 / totals.Tokens), small, secondary, edge, line, right);
+                    line += 17;
                 }
             }
         }

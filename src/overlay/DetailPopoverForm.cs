@@ -597,11 +597,12 @@ namespace CodexInputUsage
             return bmp;
         }
 
-        internal static Bitmap RenderHistoryPreviewBitmap(SessionMetricsSnapshot snap, UsageHistoryData data, DateTime now, ThemePalette palette, float scale = 1f, UsagePeriod period = UsagePeriod.Week, int scroll = 0)
+        internal static Bitmap RenderHistoryPreviewBitmap(SessionMetricsSnapshot snap, UsageHistoryData data, DateTime now, ThemePalette palette, float scale = 1f, UsagePeriod period = UsagePeriod.Week, int scroll = 0, Point? mouse = null)
         {
             var view = new UsageView();
             view.Update(data, now);
             view.Select(period);
+            if (mouse.HasValue) view.Mouse = mouse.Value;
             int height = PopoverHeight;
             var bmp = new Bitmap(OverlayDpi.Pixels(PopoverWidth, scale), OverlayDpi.Pixels(height, scale), PixelFormat.Format32bppArgb);
             using (var g = Graphics.FromImage(bmp))

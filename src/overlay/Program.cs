@@ -443,6 +443,12 @@ namespace CodexInputUsage
             using (var bmp = DetailPopoverForm.RenderPreviewBitmap(mixed, ThemePalette.Light, PopoverTab.Turns, 1f, true))
                 bmp.Save(Path.Combine(workDir, "preview-detail-turns-summary-mixed.png"), ImageFormat.Png);
 
+            var usageHover = new Point(429, 352);
+            using (var bmp = DetailPopoverForm.RenderHistoryPreviewBitmap(snap, history, historyNow, ThemePalette.Light, mouse: usageHover))
+                bmp.Save(Path.Combine(workDir, "preview-detail-usage-hover-light.png"), ImageFormat.Png);
+            using (var bmp = DetailPopoverForm.RenderHistoryPreviewBitmap(snap, history, historyNow, ThemePalette.Dark, 1.5f, mouse: usageHover))
+                bmp.Save(Path.Combine(workDir, "preview-detail-usage-hover-dark-150.png"), ImageFormat.Png);
+
             const float dpi150 = 1.5f;
             using (var bmp = StripForm.RenderPreviewBitmap(variants[0], ThemePalette.Light, false, true, dpi150))
                 SaveDpiPreview(bmp, "strip", workDir, sb);
