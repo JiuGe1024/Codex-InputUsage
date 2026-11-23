@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -365,6 +365,8 @@ namespace CodexInputUsage
                 quota5hVars.Length > 0 ? quota5hVars[0].Describe() : "",
                 customVars.Length > 0 ? customVars[0].Describe() : ""));
             bool stripStyleOk = CheckStripStyle(sb);
+            bool modelNameOk = CheckModelNames(sb);
+            bool turnsSummaryOk = CheckTurnsSummary(sb);
 
             // 5. Verify Today & 7-Day History aggregation directly from state_5.sqlite
             var histReader = new HistoryStatsReader();
@@ -419,6 +421,22 @@ namespace CodexInputUsage
             using (var bmp = DetailPopoverForm.RenderHistoryPreviewBitmap(snap, hist, ThemePalette.Dark))
                 bmp.Save(Path.Combine(workDir, "preview-detail-history-dark.png"), ImageFormat.Png);
 
+            using (var bmp = DetailPopoverForm.RenderPreviewBitmap(snap, ThemePalette.Light, PopoverTab.Turns, 1f, true))
+                bmp.Save(Path.Combine(workDir, "preview-detail-turns-summary-light.png"), ImageFormat.Png);
+            using (var bmp = DetailPopoverForm.RenderPreviewBitmap(snap, ThemePalette.Dark, PopoverTab.Turns, 1f, true))
+                bmp.Save(Path.Combine(workDir, "preview-detail-turns-summary-dark.png"), ImageFormat.Png);
+            var mixed = new SessionMetricsSnapshot { ModelName = "gpt-6.2-sol", Turns = snap.Turns.Select((turn, index) =>
+                new TurnSummary
+                {
+                    Index = turn.Index, Model = index % 4 == 0 ? "gpt-6-astra" : null,
+                    InputTokens = turn.InputTokens, CachedInputTokens = turn.CachedInputTokens,
+                    OutputTokens = turn.OutputTokens, ReasoningOutputTokens = turn.ReasoningOutputTokens,
+                    TotalTokens = turn.TotalTokens, ModelActiveMs = turn.ModelActiveMs, ContextInputTokens = turn.ContextInputTokens,
+                    Tps = turn.Tps, TtftMs = turn.TtftMs, CacheHitPct = turn.CacheHitPct
+                }).ToList() };
+            using (var bmp = DetailPopoverForm.RenderPreviewBitmap(mixed, ThemePalette.Light, PopoverTab.Turns, 1f, true))
+                bmp.Save(Path.Combine(workDir, "preview-detail-turns-summary-mixed.png"), ImageFormat.Png);
+
             const float dpi150 = 1.5f;
             using (var bmp = StripForm.RenderPreviewBitmap(variants[0], ThemePalette.Light, false, true, dpi150))
                 SaveDpiPreview(bmp, "strip", workDir, sb);
@@ -426,6 +444,8 @@ namespace CodexInputUsage
                 SaveDpiPreview(bmp, "session", workDir, sb);
             using (var bmp = DetailPopoverForm.RenderPreviewBitmap(snap, ThemePalette.Light, PopoverTab.Turns, dpi150))
                 SaveDpiPreview(bmp, "turns", workDir, sb);
+            using (var bmp = DetailPopoverForm.RenderPreviewBitmap(snap, ThemePalette.Light, PopoverTab.Turns, dpi150, true))
+                SaveDpiPreview(bmp, "turns-summary", workDir, sb);
             using (var bmp = DetailPopoverForm.RenderHistoryPreviewBitmap(snap, hist, ThemePalette.Light, dpi150))
                 SaveDpiPreview(bmp, "history", workDir, sb);
 
@@ -448,7 +468,65 @@ namespace CodexInputUsage
             }
             sb.AppendLine(string.Format("dpi_tests logicalHit={0} workArea={1}", dpiHit, dpiBounds));
             File.WriteAllText(Path.Combine(workDir, "selftest-report.txt"), sb.ToString(), Encoding.UTF8);
-            if (!quotaFuture || !quotaReset || !quotaMissing || !dpiHit || !dpiBounds || !stripStyleOk) Environment.ExitCode = 1;
+            if (!quotaFuture || !quotaReset || !quotaMissing || !dpiHit || !dpiBounds || !stripStyleOk || !modelNameOk || !turnsSummaryOk) Environment.ExitCode = 1;
+        }
+
+        private static bool CheckModelNames(StringBuilder report)
+        {
+            var names = new[] { "gpt-6.2-sol", "gpt-6.1-sol", "gpt-6-astra", "GPT-6-Astra", "gpt-6-astra-mini",
+                "gpt-5.4", "gpt-5.3-codex", "o3-mini", "其他模型", "未知模型", null, "   ", "GPT-", "6.2-sol" };
+            var expected = new[] { "6.2sol", "6.1sol", "6Astra", "6Astra", "6Astra-mini",
+                "5.4", "5.3codex", "o3-mini", "其他模型", "未知模型", "", "", "GPT-", "6.2-sol" };
+            bool normalized = names.Select(MetricFormatter.FormatModelName).SequenceEqual(expected);
+            bool badge = MetricFormatter.FormatModelBadge("gpt-6.2-sol", "medium") == "6.2sol · 中"
+                && MetricFormatter.FormatModelBadge("gpt-6-astra", "high") == "6Astra · 高";
+            report.AppendLine(string.Format("model_name_tests normalized={0} badge={1}", normalized, badge));
+            return normalized && badge;
+        }
+
+        private static bool CheckTurnsSummary(StringBuilder report)
+        {
+            var snapshot = new SessionMetricsSnapshot { ModelName = "gpt-6.2-sol" };
+            snapshot.Turns.Add(new TurnSummary { InputTokens = 100, CachedInputTokens = 90, OutputTokens = 30,
+                ReasoningOutputTokens = 10, TotalTokens = 130, ModelActiveMs = 250, TtftMs = 2000 });
+            snapshot.Turns.Add(new TurnSummary { Model = "6.2sol", InputTokens = 300, CachedInputTokens = 240,
+                OutputTokens = 80, ReasoningOutputTokens = 50, TotalTokens = 380, ModelActiveMs = 750, TtftMs = 4000 });
+            snapshot.Turns.Add(new TurnSummary { InputTokens = 10, OutputTokens = 10,
+                TotalTokens = 20, ModelActiveMs = 199, TtftMs = -1 });
+            var single = SessionAnalytics.BuildSessionModelSummaries(snapshot);
+            var sol = single.Single();
+            bool totals = sol.Calls == 3 && sol.TotalTokens == 530 && sol.CallSharePct == 100
+                && sol.UncachedInputTokens == 80 && sol.CachedInputTokens == 330 && sol.ReasoningTokens == 60 && sol.ReplyOutputTokens == 60;
+            bool metrics = sol.AvgTps == 110 && sol.AvgTtftMs == 3000 && Math.Abs(sol.CacheHitPct.Value - 33000.0 / 410) < 1e-9;
+            snapshot.Turns.Add(new TurnSummary { Model = "gpt-6-astra", TotalTokens = 30, OutputTokens = 30, ModelActiveMs = 499 });
+            var multiple = SessionAnalytics.BuildSessionModelSummaries(snapshot);
+            bool groups = multiple.Select(model => model.Name).SequenceEqual(new[] { "6.2sol", "6Astra" })
+                && multiple[0].CallSharePct == 75 && multiple[1].Calls == 1
+                && multiple[1].AvgTps == null && multiple[1].AvgTtftMs == null && multiple[1].CacheHitPct == null
+                && SessionAnalytics.ModelName(new TurnSummary(), new SessionMetricsSnapshot()) == "未知模型";
+            bool trend = true;
+            foreach (int n in new[] { 0, 1, 2, 5, 12 })
+            {
+                var data = Enumerable.Range(0, n).Select(i => new TrendSample(2 * i + 1, 20 + i * 3, null)).ToArray();
+                var fit = SessionAnalytics.ComputeTrendFit(data, double.MaxValue);
+                trend &= fit.Length == (n < 2 ? n : 41) && fit.All(p =>
+                    !double.IsNaN(p.X) && !double.IsInfinity(p.X) && p.Low >= 0 && p.Low <= p.Value
+                    && p.Value <= p.High && p.High < double.MaxValue);
+                if (n == 1) trend &= fit[0].Value == 20;
+                if (n > 1) trend &= fit.Last().Value > fit.First().Value;
+            }
+            var noisy = new[] { 10, 79, 2, 95, 99, 103, 100, 97, 95, 93, 90, 88 };
+            bool cache = new[] { 5, 12 }.All(n =>
+            {
+                var fit = SessionAnalytics.ComputeTrendFit(noisy.Take(n).Select((value, i) => new TrendSample(i, value, null)), 100);
+                return fit.All(p => p.Low >= 0 && p.Low <= p.Value && p.Value <= p.High && p.High <= 100)
+                    && fit.Any(p => p.High > p.Low);
+            });
+            for (int i = 0; i < snapshot.Turns.Count; i++) snapshot.Turns[i].Index = i + 1;
+            bool interaction = new[] { 1f, 1.25f, 1.5f, 2f }.All(scale => DetailPopoverForm.CheckTurnsInteraction(snapshot, scale));
+            report.AppendLine(string.Format("turns_summary_tests totals={0} metrics={1} groups={2} trend={3} cache={4} interaction={5}",
+                totals, metrics, groups, trend, cache, interaction));
+            return totals && metrics && groups && trend && cache && interaction;
         }
 
         private static bool CheckStripStyle(StringBuilder report)

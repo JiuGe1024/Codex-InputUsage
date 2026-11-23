@@ -4,6 +4,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Web.Script.Serialization;
 
 namespace CodexInputUsage
@@ -241,10 +242,25 @@ namespace CodexInputUsage
             return string.Format("{0} {1:HH:mm} 重置", wk[(int)local.DayOfWeek], local);
         }
 
-        internal static string FormatModelBadge(string model, string effort)
+        private static readonly Regex ModelVersion = new Regex(@"^(\d+(?:\.\d+)?)-([A-Za-z][A-Za-z0-9]*)(.*)$");
+
+        internal static string FormatModelName(string model)
         {
             if (string.IsNullOrWhiteSpace(model)) return string.Empty;
-            string m = model.Trim();
+            string name = model.Trim();
+            if (name.Length <= 4 || !name.StartsWith("gpt-", StringComparison.OrdinalIgnoreCase)) return name;
+            name = name.Substring(4);
+            var match = ModelVersion.Match(name);
+            if (!match.Success) return name;
+            string series = match.Groups[2].Value;
+            if (string.Equals(series, "astra", StringComparison.OrdinalIgnoreCase)) series = "Astra";
+            return match.Groups[1].Value + series + match.Groups[3].Value;
+        }
+
+        internal static string FormatModelBadge(string model, string effort)
+        {
+            string m = FormatModelName(model);
+            if (m.Length == 0) return m;
             if (string.IsNullOrWhiteSpace(effort)) return m;
             string e = effort.Trim().ToLowerInvariant();
             string effLabel = e == "high" ? "高" : (e == "medium" ? "中" : (e == "low" ? "低" : effort.Trim()));
@@ -282,6 +298,13 @@ namespace CodexInputUsage
     {
         private const long MaxSingleItemMs = 600000L;
         private const double MaxPlausibleTps = 100000.0;
+
+        internal static double? ComputeAverageTps(long output, long activeMs)
+        {
+            if (output <= 0 || activeMs < 500) return null;
+            double average = output * 1000.0 / activeMs;
+            return average <= MaxPlausibleTps ? (double?)average : null;
+        }
 
         private sealed class Interval
         {
@@ -807,12 +830,7 @@ namespace CodexInputUsage
                 }
             }
 
-            if (avgOut > 0 && avgModelMs >= 500)
-            {
-                double avg = avgOut * 1000.0 / avgModelMs;
-                if (!double.IsNaN(avg) && !double.IsInfinity(avg) && avg > 0 && avg <= MaxPlausibleTps)
-                    snap.SessionAvgTps = avg;
-            }
+            snap.SessionAvgTps = ComputeAverageTps(avgOut, avgModelMs);
 
             if (snap.Turns.Count > 0)
                 snap.LatestTurn = snap.Turns[snap.Turns.Count - 1];

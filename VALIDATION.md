@@ -1,12 +1,12 @@
 # Codex InputUsage 验证记录
 
-更新于 2026-11-22。
+更新于 2026-11-23。
 
 ## 已实测通过
 
 ### 1. 构建与零警告检查
 - 命令：`powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/Build-OverlayPrototype.ps1`
-- 结果：退出码 0，0 错误 0 警告，产物 `outputs/Codex-InputUsage-Overlay.exe`（169,984 字节）。
+- 结果：退出码 0，0 错误 0 警告，产物 `outputs/Codex-InputUsage-Overlay.exe`（210,432 字节）。
 
 ### 2. 路由与零猜测会话匹配（`--self-test`）
 - 单测结果：`match_tests pool=True header=True bodyTieBreak=True refuseAmbig=True disconnectClear=True localHdr=True localSingle=True localRefuseAmbig=True`
@@ -25,7 +25,7 @@
   - 会话累计：`68,647,453`（原版 TokenBar：`68,647.45k`），累计缓存：`97.41%`（原版：`97.41%`）
   - TPS：修正后最近 6 轮稳定在 `40.9–50.2 tok/s`（最后一轮 `47 tok/s`，模型耗时 `43.7s` = 整轮 `45.9s` - 工具 `2.2s`），修复了旧口径遗漏工具调用参数生成耗时导致的 `350 tok/s` 虚高
   - 十通道上下文和：`271,654 == 官方 271,654`（`用户消息 87,226 / 模型回复 76,740 / 工具结果 74,370 / 系统提示词 16,532 / 系统工具 7,798 / 压缩摘要 5,824 / MCP 工具 2,082 / Skill 696 / 用户规则 386 / 子代理通知 0`）
-  - 会话均速与模型徽标：`avgTps = 32.3 tok/s`，`model = gpt-6.2-sol (medium)` -> 显示 `gpt-6.2-sol · 中`
+  - 会话均速与模型徽标：`avgTps = 32.3 tok/s`，`model = gpt-6.2-sol (medium)` -> 显示 `6.2sol · 中`
   - 账号级实时额度覆盖：解析旧对话 `01a1b9da` 时，`AccountQuotaReader` 自动从最新落盘的 `01a1f999` 提取账号实时额度（`5h 余 22% · 1m 后重置`，`周余 48% · 21h 2m 后重置`）
 
 ### 4. MCP 原生伴随启动握手
@@ -63,6 +63,15 @@
 - 用同一 25 轮真实日志比对 96 DPI 完整档，从 `332×24` 收窄到 `265×24`（约 20%）。紧凑档 `232×24`。本次额度为 94% 时，带 5h 胶囊的完整档 `331×24`。150% 完整档 `398×36`。
 - 已目视核对 `work/preview-strip-light.png`、`preview-strip-dark.png`、`preview-strip-compact-light.png`、`preview-strip-quota5h-light.png` 与 `preview-dpi150-strip.png`。检查了字体、胶囊对齐、语义着色与矢量竖线。自 `a2a3b2b` 起，150% 的三页详情预览均为 `810×912`。
 - 正式产物已部署，只重启 InputUsage 浮层。实际进程日志记录了单屏 96 DPI 启动和 Codex 识别。
+
+### 9. 调用明细总汇总与模型短名
+
+- 正式构建和 `--self-test` 均返回 0，编译 0 错误、0 警告。既有匹配、额度、设置、常驻条和 DPI 检查均通过。
+- `model_name_tests normalized=True badge=True`。覆盖大小写、版本、代号、后缀、空白、非 GPT 模型和推理档位。
+- `turns_summary_tests totals=True metrics=True groups=True trend=True cache=True interaction=True`。聚合测试验证四段 Token、加权速度、平均首字、缓存命中和缺省模型。拟合覆盖 0/1/2/5/12 点与缓存边界。离屏模拟使用实际绘制热区和鼠标处理函数，在 100%、125%、150%、200% 验证子视图切换、指标选择、滚动、锁定模型与解除锁定。
+- 25 轮真实 rollout 的模型卡合计 39,287,962 Token，均速 24.3 tok/s，缓存命中 96.66%。历史预览来自真实 SQLite，近 7 日 17 个会话、2 个模型。目视核对明暗主题、混合模型示例与 150% 预览，单模型的三块卡片一屏完整呈现，三个主页面及调用总汇总的 150% 预览均为 810×912。
+- 总汇总预览为 `work/preview-detail-turns-summary-light.png`、`work/preview-detail-turns-summary-dark.png`、`work/preview-dpi150-turns-summary.png`。混合模型预览使用同一真实样本的统计值并人为分配模型标签。
+- 正式部署只替换 InputUsage 浮层（PID 25288 → 49480），日志确认新进程识别原生 Codex。部署时桌面前台为其他窗口，浮层按正常逻辑隐藏。新弹窗交互通过离屏模拟，未在前台 Codex 实点。
 
 ## 未在本终端执行的验证边界
 

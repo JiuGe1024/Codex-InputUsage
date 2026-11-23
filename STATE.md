@@ -1,6 +1,6 @@
 # Codex InputUsage 当前状态
 
-更新于 2026-11-22。独立仓库目录：`Codex-InputUsage`（与父目录原版 TokenBar 分开维护）。
+更新于 2026-11-23。独立仓库目录：`Codex-InputUsage`（与父目录原版 TokenBar 分开维护）。
 
 ## 核心架构（无 CDP 路线）
 
@@ -17,16 +17,19 @@
 | `src/overlay/RolloutMetrics.cs` | 增量字节偏移解析 rollout JSONL：解析 `turn_context`（每轮模型/推理档位）与去重统计每轮上下文输入、思考/正文输出、会话累计 Token、缓存命中率、会话加权均速（Avg TPS）；TPS 分母采用 `整轮耗时 - (工具区间并集 - 与模型重叠)`；解析 `world_state`/`response_item`/`additional_tools`/`compacted` 生成十通道上下文拆分并按 Hamilton 最大余数法等比缩放至官方 `ContextUsedTokens` |
 | `src/overlay/ComposerDock.cs` | 独立 MTA 线程通过 UIA 定位 `ProseMirror -> composer -> Context 圆环 / 模型选择器 / 左侧按钮簇`，支持单次快速重读、`AutoResetEvent` 即时唤醒与切窗锚点缓存 |
 | `src/overlay/HostWindowEvents.cs` | UI 线程进程外 Win32 `SetWinEventHook`：全局监听切窗/最小化（`<1ms` 隐藏与首帧恢复），按 Codex PID 精确监听 `EVENT_OBJECT_LOCATIONCHANGE` 驱动拖动/缩放快路径 |
-| `src/overlay/StripForm.cs` | `WS_EX_LAYERED` + `UpdateLayeredWindow` 32 位预乘 Alpha 透明渲染：Segoe UI Variable Text Semibold（带 Segoe UI 回退）、语义着色的 TPS 与矢量闪电、中性本轮/累计 Token 胶囊、语义缓存胶囊和可选 5h 额度胶囊。可见槽位以细竖线分隔，绘制与测量共用布局，支持右键配置与四档窄窗适配，纯平移走 `MoveFast`（`SWP_NOREDRAW` 零重绘） |
-| `src/overlay/DetailPopoverForm.cs` | 点击状态条在上方展开监控卡片（三页签共用 `540×608` 逻辑尺寸、`WS_EX_NOACTIVATE`）：顶部带矢量图标的「当前会话 / 逐轮明细 / 今日与 7 日汇总」三页签切换、标题栏模型徽标与「钉住」开关、点击外部/`Esc` 自动收起；会话页含 2×2 指标卡（输出速度与会话平均速度并列）、双列实时额度卡与十通道上下文卡；逐轮明细页含模型/速度/首字/上下文-思考-正文/Token 消耗/缓存表格与可拖拽滚动条；汇总页含今日/7 日双卡、可悬停查精确值的 7 日柱状图、按模型分布与近 7 日 Top 5 会话 |
+| `src/overlay/StripForm.cs` | `WS_EX_LAYERED` + `UpdateLayeredWindow` 32 位预乘 Alpha 透明渲染：Segoe UI Variable Text Semibold（带 Segoe UI 回退）、语义着色的 TPS 与矢量闪电、柔和主题蓝本轮/累计 Token 胶囊、语义缓存胶囊和可选 5h 额度胶囊。可见槽位以细竖线分隔，绘制与测量共用布局，支持右键配置与四档窄窗适配，纯平移走 `MoveFast`（`SWP_NOREDRAW` 零重绘） |
+| `src/overlay/DetailPopoverForm.cs` | 点击状态条在上方展开监控卡片（三页签共用 `540×608` 逻辑尺寸、`WS_EX_NOACTIVATE`）：顶部带矢量图标的「当前会话 / 调用明细 / 今日与 7 日汇总」三页签切换、标题栏模型徽标与「钉住」开关、点击外部/`Esc` 自动收起；会话页含 2×2 指标卡（输出速度与会话平均速度并列）、双列实时额度卡与十通道上下文卡；调用明细页固定子工具栏，可切换按轮表格与总汇总。总汇总显示会话走势、趋势拟合及四段 Token 占比模型卡，多模型时可单击卡片锁定拟合；汇总页含今日/7 日双卡、可悬停查精确值的 7 日柱状图、按模型分布与近 7 日 Top 5 会话 |
+| `src/overlay/SessionAnalytics.cs` | 按模型聚合轮次、四段 Token、加权 TPS、平均首字和缓存命中率。趋势样本较少时使用 OLS，较多时使用高斯核局部线性拟合 |
 | `src/overlay/CodexTheme.cs` | 读取 `~/.codex/config.toml` 的 `appearanceTheme`（回退系统主题），提供明暗双主题与十通道上下文色板 |
 | `src/overlay/Program.cs` | 协调所有子系统、单实例互斥锁、系统托盘、`FileSystemWatcher` rollout 实时监听、`--exit-with-codex` 自动退出与 `--self-test` 自检 |
+
+弹窗统一使用模型短名，例如 `6.2sol · 中`、`6Astra`。解析、会话匹配、历史聚合和诊断使用原始模型 ID。
 
 ## 额度显示与 DPI
 
 - 常驻条与详情额度卡共用 `MetricFormatter` 的归一化规则。已有用量且重置时间到达时显示 `100%`，详情显示「已重置」。原始用量与重置时间继续保留，缺用量时显示 `--`。
 - 常驻条、三页签弹窗和 UIA 定位边距按宿主 Codex 窗口 DPI 缩放。内部布局与命中检测使用 96 DPI 逻辑坐标，窗口、UIA 矩形和外部点击使用物理像素。宿主 DPI 变化时重新测量并重绘。
-- 弹窗使用 12 DIP 外圆角。高度受限时，当前会话和汇总保留顶部页签并允许滚动正文，逐轮页按可用高度减少可见行数。极窄工作区容不下完整宽度时，弹窗按可用宽度等比收缩。
+- 弹窗使用 12 DIP 外圆角。高度受限时，当前会话、历史汇总和调用总汇总允许滚动正文，调用明细的子工具栏固定在页签下方。按轮表格根据可用高度减少可见行数。极窄工作区容不下完整宽度时，弹窗按可用宽度等比收缩。
 
 ## 原生伴随启动机制
 
