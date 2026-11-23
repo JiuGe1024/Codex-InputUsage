@@ -6,7 +6,7 @@
 
 ### 1. 构建与零警告检查
 - 命令：`powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/Build-OverlayPrototype.ps1`
-- 结果：退出码 0，0 错误 0 警告，产物 `outputs/Codex-InputUsage-Overlay.exe`（210,432 字节）。
+- 结果：退出码 0，0 错误 0 警告，产物 `outputs/Codex-InputUsage-Overlay.exe`（233,984 字节）。
 
 ### 2. 路由与零猜测会话匹配（`--self-test`）
 - 单测结果：`match_tests pool=True header=True bodyTieBreak=True refuseAmbig=True disconnectClear=True localHdr=True localSingle=True localRefuseAmbig=True`
@@ -72,6 +72,15 @@
 - 25 轮真实 rollout 的模型卡合计 39,287,962 Token，均速 24.3 tok/s，缓存命中 96.66%。历史预览来自真实 SQLite，近 7 日 17 个会话、2 个模型。目视核对明暗主题、混合模型示例与 150% 预览，单模型的三块卡片一屏完整呈现，三个主页面及调用总汇总的 150% 预览均为 810×912。
 - 总汇总预览为 `work/preview-detail-turns-summary-light.png`、`work/preview-detail-turns-summary-dark.png`、`work/preview-dpi150-turns-summary.png`。混合模型预览使用同一真实样本的统计值并人为分配模型标签。
 - 正式部署只替换 InputUsage 浮层（PID 25288 → 49480），日志确认新进程识别原生 Codex。部署时桌面前台为其他窗口，浮层按正常逻辑隐藏。新弹窗交互通过离屏模拟，未在前台 Codex 实点。
+
+### 10. 用量统计与全弹窗平滑曲线
+
+- 正式构建及 `--self-test` 均返回 0，编译 0 错误、0 警告。既有匹配、额度、设置、常驻条、模型短名、调用总汇总和 DPI 检查全部通过。
+- `usage_stats_tests dates=True sources=True curves=True interaction=True`。覆盖六档时间与自定义起止反转、25 小时桶、7/30 日桶、长区间按月、rollout 重复响应与跨会话记录过滤、SQLite 回退和覆盖计数、四段 Token 守恒，以及空/单点/多点贝塞尔路径与无过冲控制点。
+- 四档 DPI 离屏模拟使用实际弹窗绘制热区与鼠标处理函数。验证预设切换、日期字段选择、加减步进、滚轮调节、已确认区间保留、提交倒置日期与弹窗正文滚动。
+- 桌面环境自测读到 96 个真实用户会话。最近 7 天按响应时间计得 232,513,343 Token、17 个会话、1,577 次调用，17 个会话均有响应明细。无明细回退由混合数据自测覆盖。
+- 已目视核对明暗主题、1 天小时趋势、自定义筛选、滚动后的模型排行与 Top 5，以及 150% 用量统计和调用总汇总。150% 弹窗均为 810×912。预览位于 `work/preview-detail-history-*.png`、`work/preview-detail-usage-*.png`、`work/preview-dpi150-history.png` 及调用总汇总对应预览。
+- 仅替换并重启 InputUsage 浮层（PID 49480 → 39196）。诊断日志确认新版于 19:12:53 通过 UIA 停靠原生 Codex。筛选交互与高 DPI 仍由离屏测试覆盖。
 
 ## 未在本终端执行的验证边界
 

@@ -368,13 +368,13 @@ namespace CodexInputUsage
             bool modelNameOk = CheckModelNames(sb);
             bool turnsSummaryOk = CheckTurnsSummary(sb);
 
-            // 5. Verify Today & 7-Day History aggregation directly from state_5.sqlite
-            var histReader = new HistoryStatsReader();
-            var hist = histReader.GetSnapshot(true);
-            sb.AppendLine(string.Format("history todayTok={0} todayThreads={1} weekTok={2} weekThreads={3} avgDaily={4} allTok={5} allThreads={6} models7d={7} top7d={8}",
-                hist.TodayTokens, hist.TodayThreads, hist.SevenDayTokens, hist.SevenDayThreads,
-                hist.SevenDayAvgDailyTokens, hist.AllTimeTokens, hist.AllTimeThreads,
-                hist.Models7d.Count, hist.TopThreads7d.Count));
+            var history = new HistoryStatsReader().Refresh();
+            DateTime historyNow = DateTime.Now;
+            var hist = history.Build(UsagePeriod.Week, historyNow, default(DateTime), default(DateTime));
+            bool usageStatsOk = UsageStatsChecks.Run(sb, workDir);
+            sb.AppendLine(string.Format("usage real weekTok={0} threads={1} detailedThreads={2} calls={3} fallbackTokens={4} models={5} allTok={6} allThreads={7}",
+                hist.Total.Tokens, hist.Total.Sessions, hist.Total.DetailedThreads, hist.Total.Calls, hist.Total.UnbrokenTokens,
+                hist.Models.Length, hist.AllTimeTokens, hist.AllTimeThreads));
 
             if (snap.ContextChannels != null && snap.ContextChannels.Count > 0)
             {
@@ -416,11 +416,17 @@ namespace CodexInputUsage
                 bmp.Save(Path.Combine(workDir, "preview-detail-turns-light.png"), ImageFormat.Png);
             using (var bmp = DetailPopoverForm.RenderPreviewBitmap(snap, ThemePalette.Dark, PopoverTab.Turns))
                 bmp.Save(Path.Combine(workDir, "preview-detail-turns-dark.png"), ImageFormat.Png);
-            using (var bmp = DetailPopoverForm.RenderHistoryPreviewBitmap(snap, hist, ThemePalette.Light))
+            using (var bmp = DetailPopoverForm.RenderHistoryPreviewBitmap(snap, history, historyNow, ThemePalette.Light))
                 bmp.Save(Path.Combine(workDir, "preview-detail-history-light.png"), ImageFormat.Png);
-            using (var bmp = DetailPopoverForm.RenderHistoryPreviewBitmap(snap, hist, ThemePalette.Dark))
+            using (var bmp = DetailPopoverForm.RenderHistoryPreviewBitmap(snap, history, historyNow, ThemePalette.Dark))
                 bmp.Save(Path.Combine(workDir, "preview-detail-history-dark.png"), ImageFormat.Png);
 
+            using (var bmp = DetailPopoverForm.RenderHistoryPreviewBitmap(snap, history, historyNow, ThemePalette.Light, 1f, UsagePeriod.Day))
+                bmp.Save(Path.Combine(workDir, "preview-detail-usage-1d-light.png"), ImageFormat.Png);
+            using (var bmp = DetailPopoverForm.RenderHistoryPreviewBitmap(snap, history, historyNow, ThemePalette.Light, 1f, UsagePeriod.Custom))
+                bmp.Save(Path.Combine(workDir, "preview-detail-usage-custom-light.png"), ImageFormat.Png);
+            using (var bmp = DetailPopoverForm.RenderHistoryPreviewBitmap(snap, history, historyNow, ThemePalette.Light, 1f, UsagePeriod.Week, 185))
+                bmp.Save(Path.Combine(workDir, "preview-detail-usage-ranked-light.png"), ImageFormat.Png);
             using (var bmp = DetailPopoverForm.RenderPreviewBitmap(snap, ThemePalette.Light, PopoverTab.Turns, 1f, true))
                 bmp.Save(Path.Combine(workDir, "preview-detail-turns-summary-light.png"), ImageFormat.Png);
             using (var bmp = DetailPopoverForm.RenderPreviewBitmap(snap, ThemePalette.Dark, PopoverTab.Turns, 1f, true))
@@ -446,7 +452,7 @@ namespace CodexInputUsage
                 SaveDpiPreview(bmp, "turns", workDir, sb);
             using (var bmp = DetailPopoverForm.RenderPreviewBitmap(snap, ThemePalette.Light, PopoverTab.Turns, dpi150, true))
                 SaveDpiPreview(bmp, "turns-summary", workDir, sb);
-            using (var bmp = DetailPopoverForm.RenderHistoryPreviewBitmap(snap, hist, ThemePalette.Light, dpi150))
+            using (var bmp = DetailPopoverForm.RenderHistoryPreviewBitmap(snap, history, historyNow, ThemePalette.Light, dpi150))
                 SaveDpiPreview(bmp, "history", workDir, sb);
 
             bool dpiHit = true, dpiBounds = true;
@@ -468,7 +474,7 @@ namespace CodexInputUsage
             }
             sb.AppendLine(string.Format("dpi_tests logicalHit={0} workArea={1}", dpiHit, dpiBounds));
             File.WriteAllText(Path.Combine(workDir, "selftest-report.txt"), sb.ToString(), Encoding.UTF8);
-            if (!quotaFuture || !quotaReset || !quotaMissing || !dpiHit || !dpiBounds || !stripStyleOk || !modelNameOk || !turnsSummaryOk) Environment.ExitCode = 1;
+            if (!quotaFuture || !quotaReset || !quotaMissing || !dpiHit || !dpiBounds || !stripStyleOk || !modelNameOk || !turnsSummaryOk || !usageStatsOk) Environment.ExitCode = 1;
         }
 
         private static bool CheckModelNames(StringBuilder report)
@@ -682,6 +688,8 @@ namespace CodexInputUsage
             private readonly SessionMatcher _matcher = new SessionMatcher();
             private readonly AccountQuotaReader _quotaReader = new AccountQuotaReader();
             private readonly HistoryStatsReader _historyReader = new HistoryStatsReader();
+            private long _nextHistoryRefresh;
+            private bool _historyLoading;
             private readonly StripSlotPreferences _slotPrefs = OverlaySettingsStore.Load();
             private readonly RolloutSessionTracker _rollout = new RolloutSessionTracker();
             private readonly ComposerDockTracker _dockTracker;
@@ -731,10 +739,7 @@ namespace CodexInputUsage
                 _strip.SlotToggleRequested += OnSlotToggleRequested;
                 _strip.AutoStartToggled += OnAutoStartToggled;
                 _strip.ExitRequested += delegate { ExitThread(); };
-                _popover.HistoryTabActivated += delegate
-                {
-                    _popover.UpdateHistoryData(_historyReader.GetSnapshot(true));
-                };
+                _popover.HistoryTabActivated += delegate { RefreshHistory(); };
                 _popover.VisibleChanged += delegate
                 {
                     if (!_popover.Visible)
@@ -815,6 +820,23 @@ namespace CodexInputUsage
                 {
                     Interlocked.Exchange(ref _pendingAsyncRefresh, 0);
                 }
+            }
+
+            private void RefreshHistory()
+            {
+                long now = Stopwatch.GetTimestamp();
+                if (_historyLoading || now < _nextHistoryRefresh) return;
+                _historyLoading = true;
+                _nextHistoryRefresh = now + 10 * Stopwatch.Frequency;
+                ThreadPool.QueueUserWorkItem(delegate
+                {
+                    var data = _historyReader.Refresh();
+                    _uiContext.Post(delegate
+                    {
+                        _historyLoading = false;
+                        if (!_popover.IsDisposed) _popover.UpdateHistoryData(data);
+                    }, null);
+                });
             }
 
             private void OnForegroundChanged(object sender, EventArgs e)
@@ -955,7 +977,7 @@ namespace CodexInputUsage
                 {
                     ThemePalette pal = ThemePalette.For(CodexThemeSource.Current);
                     if (_popover.ActiveTab == PopoverTab.History)
-                        _popover.UpdateHistoryData(_historyReader.GetSnapshot(true));
+                        RefreshHistory();
                     _popover.UpdateData(_lastMetrics, pal, _lastStripBounds, _anchorDpiScale);
                     if (!_popover.Visible) _popover.Show();
                     _popover.PositionAbove(_lastStripBounds);
@@ -1161,7 +1183,7 @@ namespace CodexInputUsage
                 if (_popoverWanted)
                 {
                     if (_popover.ActiveTab == PopoverTab.History)
-                        _popover.UpdateHistoryData(_historyReader.GetSnapshot(false));
+                        RefreshHistory();
                     _popover.UpdateData(_lastMetrics, pal, placed, _anchorDpiScale);
                     if (!_popover.Visible) _popover.Show();
                 }

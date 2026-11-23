@@ -316,10 +316,8 @@ namespace CodexInputUsage
                 {
                     if (!fit && screenPoints.Length > 1)
                     {
-                        var area = screenPoints.Concat(new[] { new PointF(screenPoints.Last().X, plot.Bottom),
-                            new PointF(screenPoints[0].X, plot.Bottom) }).ToArray();
-                        g.FillPolygon(fill, area);
-                        g.DrawLines(pen, screenPoints);
+                        OverlayCharts.DrawArea(g, screenPoints, plot, line);
+                        using (var curve = OverlayCharts.BuildSmoothCurvePath(screenPoints)) g.DrawPath(pen, curve);
                     }
                     if (fit)
                     {
@@ -328,10 +326,11 @@ namespace CodexInputUsage
                         note = "均值 " + TrendLabel(mean, metric);
                         if (estimates.Length > 1)
                         {
-                            var upper = estimates.Select(point => map(point.X, point.High));
-                            var lower = estimates.Reverse().Select(point => map(point.X, point.Low));
-                            g.FillPolygon(fill, upper.Concat(lower).ToArray());
-                            g.DrawLines(pen, estimates.Select(point => map(point.X, point.Value)).ToArray());
+                            var upper = estimates.Select(point => map(point.X, point.High)).ToArray();
+                            var lower = estimates.Select(point => map(point.X, point.Low)).ToArray();
+                            using (var band = OverlayCharts.BuildSmoothBandPath(upper, lower)) g.FillPath(fill, band);
+                            using (var curve = OverlayCharts.BuildSmoothCurvePath(estimates.Select(point => map(point.X, point.Value)).ToArray()))
+                                g.DrawPath(pen, curve);
                         }
                     }
                     for (int i = 0; i < screenPoints.Length; i++)
@@ -405,7 +404,7 @@ namespace CodexInputUsage
             DrawSummaryCard(g, card, pal, selected ? color : hover ? Color.FromArgb(135, color) : pal.Border);
             int x = card.X + 11;
             int width = card.Width - 22;
-            var colors = new[] { pal.AccentBlue, pal.CtxToolResults, pal.CtxUserInput, pal.CtxCheckpoint };
+            var colors = UsageColors(pal);
             var tokens = new[] { model.UncachedInputTokens, model.CachedInputTokens, model.ReasoningTokens, model.ReplyOutputTokens };
             var labels = new[] { "新输入", "缓存", "思考", "输出" };
             using (var dot = new SolidBrush(color))
@@ -421,25 +420,7 @@ namespace CodexInputUsage
                 g.DrawString(MetricFormatter.CompactTokens(model.TotalTokens), bold, primary, card.Right - 11, card.Y + 9, right);
 
                 var bar = new Rectangle(x, card.Y + 30, width, 7);
-                using (var path = StripForm.CreateRoundedPath(bar, 3))
-                using (var rail = new SolidBrush(pal.Border))
-                {
-                    g.FillPath(rail, path);
-                    var state = g.Save();
-                    g.SetClip(path, CombineMode.Intersect);
-                    double total = tokens.Sum(value => (double)value);
-                    int remaining = bar.Width - 3 * tokens.Count(value => value > 0);
-                    float next = bar.X;
-                    for (int i = 0; i < tokens.Length; i++)
-                    {
-                        if (tokens[i] <= 0) continue;
-                        float segment = 3 + (float)(remaining * tokens[i] / total);
-                        using (var fill = new SolidBrush(colors[i]))
-                            g.FillRectangle(fill, next, bar.Y, segment + 0.15f, bar.Height);
-                        next += segment;
-                    }
-                    g.Restore(state);
-                }
+                DrawUsageComposition(g, bar, tokens, colors, pal);
                 for (int i = 0; i < labels.Length; i++)
                 {
                     int left = x + i * width / labels.Length;

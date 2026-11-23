@@ -45,8 +45,6 @@ namespace CodexInputUsage
         private const int InspectorHeight = 28;
         private const int SessionVisibleRows = 5;
 
-        private const int HistSummaryHeight = 70;
-        private const int HistChartHeight = 162;
         private const int HistTopThreadsHeight = 154;
 
         private delegate IntPtr LowLevelProc(int nCode, IntPtr wParam, IntPtr lParam);
@@ -77,7 +75,6 @@ namespace CodexInputUsage
 
         private ThemePalette _palette = ThemePalette.Light;
         private SessionMetricsSnapshot _snapshot = new SessionMetricsSnapshot();
-        private HistoryStatsSnapshot _history = new HistoryStatsSnapshot();
         private PopoverTab _activeTab = PopoverTab.Session;
         private Rectangle _anchorStrip = Rectangle.Empty;
         private float _hostDpiScale = 1f;
@@ -93,7 +90,6 @@ namespace CodexInputUsage
         private Rectangle _tableRowsRect = Rectangle.Empty;
         private Rectangle _scrollTrackRect = Rectangle.Empty;
         private Rectangle _scrollThumbRect = Rectangle.Empty;
-        private Rectangle[] _dayBarRects = new Rectangle[0];
 
         private bool _closeHovered;
         private bool _pinHovered;
@@ -103,8 +99,6 @@ namespace CodexInputUsage
         private int _visibleRows = SessionVisibleRows;
         private int _hoveredRowIndex = -1;
         private int _selectedTurnIndex = -1;
-        private int _hoveredDayIndex = -1;
-        private int _selectedDayIndex = -1;
         private bool _draggingScroll;
         private int _dragStartY;
         private int _dragStartOffset;
@@ -251,11 +245,14 @@ namespace CodexInputUsage
             Invalidate();
         }
 
-        internal void UpdateHistoryData(HistoryStatsSnapshot history)
+        internal void UpdateHistoryData(UsageHistoryData data)
         {
-            _history = history ?? new HistoryStatsSnapshot();
+            _usage.Update(data, DateTime.Now);
             if (_activeTab == PopoverTab.History && Visible)
+            {
+                PositionAbove(_anchorStrip);
                 Invalidate();
+            }
         }
 
         internal void PositionAbove(Rectangle anchor)
@@ -272,7 +269,7 @@ namespace CodexInputUsage
             _visibleRows = VisibleTurnRows(_activeTab, rows, logicalHeight);
             _scrollOffset = _activeTab == PopoverTab.Turns ? Math.Min(_scrollOffset, Math.Max(0, rows - _visibleRows)) : 0;
             int contentHeight = _activeTab == PopoverTab.History
-                ? HistoryHeight(_history)
+                ? HistoryHeight(_usage)
                 : ShowingSummary ? TurnsSummaryHeight(_turnsView.Models(_snapshot).Length)
                 : TurnTableChromeHeight(_activeTab) + _visibleRows * RowHeight;
             _maxBodyScroll = Math.Max(0, contentHeight - logicalHeight);
@@ -327,7 +324,9 @@ namespace CodexInputUsage
         {
             base.OnMouseWheel(e);
             int bodyTop = _activeTab == PopoverTab.Turns ? TurnsBodyTop : HeaderHeight + TabBarHeight;
-            if (e.Delta == 0 || OverlayDpi.ToLogical(e.Location, _dpiScale).Y < bodyTop) return;
+            Point location = OverlayDpi.ToLogical(e.Location, _dpiScale);
+            if (e.Delta == 0 || location.Y < bodyTop) return;
+            if (_activeTab == PopoverTab.History && HandleUsageWheel(location, e.Delta)) return;
             if (_activeTab != PopoverTab.Turns || ShowingSummary)
             {
                 int scroll = Math.Max(0, Math.Min(_maxBodyScroll, _bodyScroll - e.Delta / 3));
@@ -335,8 +334,8 @@ namespace CodexInputUsage
                 {
                     _bodyScroll = scroll;
                     _turnsView.Mouse = new Point(-1, -1);
+                    _usage.Mouse = new Point(-1, -1);
                     _hoveredRowIndex = -1;
-                    _hoveredDayIndex = -1;
                     Invalidate();
                 }
                 return;
@@ -415,7 +414,9 @@ namespace CodexInputUsage
             Point bodyLocation = new Point(location.X, location.Y + _bodyScroll);
             bool overBody = location.Y >= HeaderHeight + TabBarHeight;
             int nextHoverRow = -1;
-            int nextHoverDay = -1;
+            bool usageChanged = _activeTab == PopoverTab.History && _usage.Mouse != location;
+            if (usageChanged) _usage.Mouse = location;
+            var usageHit = _activeTab == PopoverTab.History ? _usage.Hit(location) : null;
             if (_activeTab != PopoverTab.History)
             {
                 if (overBody && _tableRowsRect.Contains(bodyLocation))
@@ -426,29 +427,15 @@ namespace CodexInputUsage
                         nextHoverRow = r;
                 }
             }
-            else if (overBody && _dayBarRects != null)
-            {
-                for (int i = 0; i < _dayBarRects.Length; i++)
-                {
-                    if (_dayBarRects[i].Contains(bodyLocation))
-                    {
-                        nextHoverDay = i;
-                        break;
-                    }
-                }
-            }
-
-            bool needRepaint = turnsChanged || (overClose != _closeHovered)
+            bool needRepaint = turnsChanged || usageChanged || (overClose != _closeHovered)
                 || (overPin != _pinHovered)
                 || (nextHoverTab != _hoveredTab)
-                || (nextHoverRow != _hoveredRowIndex)
-                || (nextHoverDay != _hoveredDayIndex);
+                || (nextHoverRow != _hoveredRowIndex);
             _closeHovered = overClose;
             _pinHovered = overPin;
             _hoveredTab = nextHoverTab;
             _hoveredRowIndex = nextHoverRow;
-            _hoveredDayIndex = nextHoverDay;
-            bool hand = overTurnsControl || overClose || overPin || nextHoverTab >= 0 || nextHoverRow >= 0 || nextHoverDay >= 0
+            bool hand = overTurnsControl || overClose || overPin || nextHoverTab >= 0 || nextHoverRow >= 0 || (usageHit != null && usageHit.Click != null)
                 || (_activeTab == PopoverTab.Turns && !_scrollThumbRect.IsEmpty && _scrollThumbRect.Contains(location));
             Cursor = hand ? Cursors.Hand : Cursors.Default;
             if (needRepaint) Invalidate();
@@ -458,14 +445,14 @@ namespace CodexInputUsage
         {
             base.OnMouseLeave(e);
             if (_draggingScroll) return;
-            if (_activeTab == PopoverTab.Turns || _closeHovered || _pinHovered || _hoveredTab >= 0 || _hoveredRowIndex >= 0 || _hoveredDayIndex >= 0)
+            if (_activeTab == PopoverTab.Turns || _activeTab == PopoverTab.History || _closeHovered || _pinHovered || _hoveredTab >= 0 || _hoveredRowIndex >= 0)
             {
                 _turnsView.Mouse = new Point(-1, -1);
+                _usage.Mouse = new Point(-1, -1);
                 _closeHovered = false;
                 _pinHovered = false;
                 _hoveredTab = -1;
                 _hoveredRowIndex = -1;
-                _hoveredDayIndex = -1;
                 Cursor = Cursors.Default;
                 Invalidate();
             }
@@ -507,11 +494,11 @@ namespace CodexInputUsage
                 if (_activeTab != targetTab.Value)
                 {
                     _activeTab = targetTab.Value;
+                    _usage.Mouse = new Point(-1, -1);
                     _turnsView.Mouse = new Point(-1, -1);
                     _bodyScroll = 0;
                     _hoveredRowIndex = -1;
                     _selectedTurnIndex = -1;
-                    _hoveredDayIndex = -1;
                     if (_activeTab == PopoverTab.History && HistoryTabActivated != null)
                         HistoryTabActivated(this, EventArgs.Empty);
                     PositionAbove(_anchorStrip);
@@ -541,33 +528,23 @@ namespace CodexInputUsage
                 }
                 if (ShowingSummary || location.Y < TurnsBodyTop) return;
             }
+            if (_activeTab == PopoverTab.History)
+            {
+                ClickUsage(location);
+                return;
+            }
             if (location.Y < HeaderHeight + TabBarHeight) return;
             location.Offset(0, _bodyScroll);
-            if (_activeTab != PopoverTab.History)
+            if (_tableRowsRect.Contains(location))
             {
-                if (!_tableRowsRect.IsEmpty && _tableRowsRect.Contains(location))
+                int row = (location.Y - _tableRowsRect.Top) / RowHeight;
+                int count = _snapshot.Turns != null ? _snapshot.Turns.Count : 0;
+                int index = count - 1 - (_scrollOffset + row);
+                if (row < _visibleRows && index >= 0 && index < count)
                 {
-                    int r = (location.Y - _tableRowsRect.Top) / RowHeight;
-                    int count = _snapshot.Turns != null ? _snapshot.Turns.Count : 0;
-                    int revIdx = count - 1 - (_scrollOffset + r);
-                    if (r >= 0 && r < _visibleRows && revIdx >= 0 && revIdx < count)
-                    {
-                        int turnNum = _snapshot.Turns[revIdx].Index;
-                        _selectedTurnIndex = (_selectedTurnIndex == turnNum) ? -1 : turnNum;
-                        Invalidate();
-                    }
-                }
-            }
-            else if (_dayBarRects != null)
-            {
-                for (int i = 0; i < _dayBarRects.Length; i++)
-                {
-                    if (_dayBarRects[i].Contains(location))
-                    {
-                        _selectedDayIndex = (_selectedDayIndex == i) ? -1 : i;
-                        Invalidate();
-                        return;
-                    }
+                    int turnNum = _snapshot.Turns[index].Index;
+                    _selectedTurnIndex = _selectedTurnIndex == turnNum ? -1 : turnNum;
+                    Invalidate();
                 }
             }
         }
@@ -579,14 +556,13 @@ namespace CodexInputUsage
             var state = e.Graphics.Save();
             e.Graphics.ScaleTransform(_dpiScale, _dpiScale);
             RenderCard(
-                e.Graphics, new Size(PopoverWidth, _logicalHeight), _snapshot, _history, _activeTab, _palette,
+                e.Graphics, new Size(PopoverWidth, _logicalHeight), _snapshot, _usage, _activeTab, _palette,
                 _bodyScroll, _scrollOffset, _visibleRows, _hoveredRowIndex, _selectedTurnIndex,
-                _hoveredDayIndex, _selectedDayIndex, _hoveredTab,
+                _hoveredTab,
                 _isPinned, _pinHovered, _closeHovered, _turnsView,
                 out _pinButtonRect, out _closeButtonRect,
                 out _tabSessionRect, out _tabHistoryRect, out _tabTurnsRect,
-                out _tableRowsRect, out _scrollTrackRect, out _scrollThumbRect,
-                out _dayBarRects);
+                out _tableRowsRect, out _scrollTrackRect, out _scrollThumbRect);
             e.Graphics.Restore(state);
         }
 
@@ -613,50 +589,38 @@ namespace CodexInputUsage
             {
                 g.ScaleTransform(scale, scale);
                 Rectangle r1, r2, r3, r4, r5, r6, r7, r8;
-                Rectangle[] dBars;
-                RenderCard(g, new Size(PopoverWidth, height), snap ?? new SessionMetricsSnapshot(), new HistoryStatsSnapshot(),
+                RenderCard(g, new Size(PopoverWidth, height), snap ?? new SessionMetricsSnapshot(), new UsageView(),
                     tab, palette,
-                    0, 0, vis, 0, -1, -1, -1, -1, false, false, false, new TurnsView { Summary = turnsSummary },
-                    out r1, out r2, out r3, out r4, out r5, out r6, out r7, out r8, out dBars);
+                    0, 0, vis, 0, -1, -1, false, false, false, new TurnsView { Summary = turnsSummary },
+                    out r1, out r2, out r3, out r4, out r5, out r6, out r7, out r8);
             }
             return bmp;
         }
 
-        internal static Bitmap RenderHistoryPreviewBitmap(SessionMetricsSnapshot snap, HistoryStatsSnapshot history, ThemePalette palette, float scale = 1f)
+        internal static Bitmap RenderHistoryPreviewBitmap(SessionMetricsSnapshot snap, UsageHistoryData data, DateTime now, ThemePalette palette, float scale = 1f, UsagePeriod period = UsagePeriod.Week, int scroll = 0)
         {
-            var hist = history ?? new HistoryStatsSnapshot();
+            var view = new UsageView();
+            view.Update(data, now);
+            view.Select(period);
             int height = PopoverHeight;
             var bmp = new Bitmap(OverlayDpi.Pixels(PopoverWidth, scale), OverlayDpi.Pixels(height, scale), PixelFormat.Format32bppArgb);
             using (var g = Graphics.FromImage(bmp))
             {
                 g.ScaleTransform(scale, scale);
                 Rectangle r1, r2, r3, r4, r5, r6, r7, r8;
-                Rectangle[] dBars;
-                RenderCard(g, new Size(PopoverWidth, height), snap ?? new SessionMetricsSnapshot(), hist,
+                RenderCard(g, new Size(PopoverWidth, height), snap ?? new SessionMetricsSnapshot(), view,
                     PopoverTab.History, palette,
-                    0, 0, 0, -1, -1, -1, -1, -1, false, false, false, new TurnsView(),
-                    out r1, out r2, out r3, out r4, out r5, out r6, out r7, out r8, out dBars);
+                    scroll, 0, 0, -1, -1, -1, false, false, false, new TurnsView(),
+                    out r1, out r2, out r3, out r4, out r5, out r6, out r7, out r8);
             }
             return bmp;
-        }
-
-        private static int HistoryHeight(HistoryStatsSnapshot history)
-        {
-            return HeaderHeight + TabBarHeight + HistSummaryHeight + HistChartHeight + ComputeHistoryModelHeight(history) + HistTopThreadsHeight + 12;
-        }
-
-        private static int ComputeHistoryModelHeight(HistoryStatsSnapshot hist)
-        {
-            int rows = hist != null && hist.Models7d != null ? Math.Min(4, hist.Models7d.Count) : 0;
-            if (rows <= 0) return 76;
-            return 56 + (rows * 20);
         }
 
         private static void RenderCard(
             Graphics g,
             Size size,
             SessionMetricsSnapshot snap,
-            HistoryStatsSnapshot history,
+            UsageView usage,
             PopoverTab activeTab,
             ThemePalette pal,
             int bodyScroll,
@@ -664,8 +628,6 @@ namespace CodexInputUsage
             int visibleRows,
             int hoveredRow,
             int selectedTurnIndex,
-            int hoveredDay,
-            int selectedDay,
             int hoveredTab,
             bool isPinned,
             bool pinHovered,
@@ -678,13 +640,11 @@ namespace CodexInputUsage
             out Rectangle tabTurnsRect,
             out Rectangle tableRowsRect,
             out Rectangle scrollTrackRect,
-            out Rectangle scrollThumbRect,
-            out Rectangle[] dayBarRects)
+            out Rectangle scrollThumbRect)
         {
             tableRowsRect = Rectangle.Empty;
             scrollTrackRect = Rectangle.Empty;
             scrollThumbRect = Rectangle.Empty;
-            dayBarRects = new Rectangle[0];
 
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
@@ -709,7 +669,7 @@ namespace CodexInputUsage
                 int y = 0;
 
                 // 1. Header bar
-                DrawHeader(g, size.Width, y, snap, history, activeTab, pal, titleFont, badgeFont, subFont, isPinned, pinHovered, closeHovered, out pinRect, out closeRect);
+                DrawHeader(g, size.Width, y, snap, usage.Snapshot, activeTab, pal, titleFont, badgeFont, subFont, isPinned, pinHovered, closeHovered, out pinRect, out closeRect);
                 y += HeaderHeight;
                 using (var sep = new Pen(pal.Border, 1f))
                     g.DrawLine(sep, 1, y, size.Width - 2, y);
@@ -732,7 +692,7 @@ namespace CodexInputUsage
                         return;
                     }
                 }
-                if (bodyScroll > 0)
+                if (bodyScroll > 0 || activeTab == PopoverTab.History)
                 {
                     g.SetClip(new Rectangle(1, y, size.Width - 2, Math.Max(0, size.Height - y - 1)), CombineMode.Intersect);
                     g.TranslateTransform(0, -bodyScroll);
@@ -747,10 +707,8 @@ namespace CodexInputUsage
 
                 if (activeTab == PopoverTab.History)
                 {
-                    RenderHistoryBody(g, size, y, history ?? new HistoryStatsSnapshot(), pal,
-                        hoveredDay, selectedDay,
-                        labelFont, heroFont, subFont, tableHeadFont, monoFont, monoBoldFont,
-                        out dayBarRects);
+                    RenderUsageBody(g, size, y, usage, bodyScroll, pal,
+                        tableHeadFont, labelFont, subFont, heroFont, monoFont, monoBoldFont);
                     return;
                 }
 
@@ -856,8 +814,7 @@ namespace CodexInputUsage
 
             if (activeTab == PopoverTab.History)
             {
-                int thCount = history != null ? history.SevenDayThreads : 0;
-                curX = DrawSmallPill(g, curX, y + 10, string.Format("近 7 日 · {0} 会话", thCount), badgeFont, pal.AccentBlue);
+                curX = DrawSmallPill(g, curX, y + 10, history.PeriodLabel + " · " + history.Total.Sessions + " 会话", badgeFont, pal.AccentBlue);
             }
             else
             {
@@ -963,7 +920,7 @@ namespace CodexInputUsage
 
             DrawSingleTab(g, tabSessionRect, "当前会话", PopoverTab.Session, activeTab == PopoverTab.Session, hoveredTab == 0, pal, boldFont, regularFont);
             DrawSingleTab(g, tabTurnsRect, "调用明细", PopoverTab.Turns, activeTab == PopoverTab.Turns, hoveredTab == 2, pal, boldFont, regularFont);
-            DrawSingleTab(g, tabHistoryRect, "今日与 7 日汇总", PopoverTab.History, activeTab == PopoverTab.History, hoveredTab == 1, pal, boldFont, regularFont);
+            DrawSingleTab(g, tabHistoryRect, "用量统计", PopoverTab.History, activeTab == PopoverTab.History, hoveredTab == 1, pal, boldFont, regularFont);
         }
 
         private static void DrawSingleTab(
@@ -1020,305 +977,6 @@ namespace CodexInputUsage
             }
         }
 
-        private static void RenderHistoryBody(
-            Graphics g, Size size, int topY, HistoryStatsSnapshot hist, ThemePalette pal,
-            int hoveredDay, int selectedDay,
-            Font labelFont, Font heroFont, Font subFont, Font headFont, Font monoFont, Font monoBoldFont,
-            out Rectangle[] dayBarRects)
-        {
-            int y = topY;
-
-            // 1. 2x1 Summary KPI Cards (Today vs Last 7 Days)
-            int gap = 8;
-            int cardW = (size.Width - (Pad * 2) - gap) / 2;
-            int cardH = 58;
-            int cardTop = y + 6;
-
-            double todayShare = hist.SevenDayTokens > 0 ? (hist.TodayTokens * 100.0 / hist.SevenDayTokens) : 0.0;
-            string todayVal = hist.TodayTokens > 0 ? MetricFormatter.CompactTokens(hist.TodayTokens) : "0";
-            string todaySub = hist.TodayThreads > 0
-                ? string.Format("{0} 个活跃会话 · 占近 7 日 {1:0.0}%", hist.TodayThreads, todayShare)
-                : "今日暂无新增消耗";
-            DrawKpiCard(g, new Rectangle(Pad, cardTop, cardW, cardH),
-                "今日消耗", todayVal, todaySub, pal.AccentBlue, pal, labelFont, heroFont, subFont);
-
-            string weekVal = hist.SevenDayTokens > 0 ? MetricFormatter.CompactTokens(hist.SevenDayTokens) : "0";
-            string weekSub = string.Format("{0} 个活跃会话 · 日均 {1}",
-                hist.SevenDayThreads,
-                MetricFormatter.CompactTokens(hist.SevenDayAvgDailyTokens));
-            DrawKpiCard(g, new Rectangle(Pad + cardW + gap, cardTop, cardW, cardH),
-                "近 7 日合计", weekVal, weekSub, pal.TextPrimary, pal, labelFont, heroFont, subFont);
-
-            y += HistSummaryHeight;
-
-            // 2. 7-Day Bar Trend Card
-            DrawSevenDayChartCard(g, size.Width, y, hist, pal, hoveredDay, selectedDay,
-                labelFont, headFont, subFont, monoFont, out dayBarRects);
-            y += HistChartHeight;
-
-            // 3. Model Distribution Card (7d + all-time footnote)
-            int modelH = ComputeHistoryModelHeight(hist);
-            DrawModelDistributionCard(g, size.Width, y, modelH, hist, pal, labelFont, headFont, subFont, monoBoldFont);
-            y += modelH;
-
-            // 4. Top 5 Active Threads Card (7d)
-            DrawTopThreadsCard(g, size.Width, y, hist, pal, labelFont, headFont, subFont, monoFont, monoBoldFont);
-        }
-
-        private static void DrawSevenDayChartCard(
-            Graphics g, int width, int y, HistoryStatsSnapshot hist, ThemePalette pal,
-            int hoveredDay, int selectedDay,
-            Font labelFont, Font headFont, Font subFont, Font monoFont,
-            out Rectangle[] dayBarRects)
-        {
-            var cardRect = new Rectangle(Pad, y + 2, width - (Pad * 2), HistChartHeight - 8);
-            using (var cPath = StripForm.CreateRoundedPath(cardRect, 7))
-            using (var cFill = new SolidBrush(pal.CardBg))
-            using (var cPen = new Pen(pal.Border, 1f))
-            {
-                g.FillPath(cFill, cPath);
-                g.DrawPath(cPen, cPath);
-            }
-
-            var days = hist.Last7Days ?? new List<DailyUsagePoint>();
-            dayBarRects = new Rectangle[days.Count];
-
-            // Determine focused day for top-right exact readout (hover > selected > peak/today)
-            int focusIdx = -1;
-            if (hoveredDay >= 0 && hoveredDay < days.Count) focusIdx = hoveredDay;
-            else if (selectedDay >= 0 && selectedDay < days.Count) focusIdx = selectedDay;
-            else if (days.Count > 0)
-            {
-                focusIdx = days.Count - 1;
-                long peak = days[focusIdx].Tokens;
-                for (int i = 0; i < days.Count; i++)
-                {
-                    if (days[i].Tokens > peak) { peak = days[i].Tokens; focusIdx = i; }
-                }
-            }
-
-            using (var titleBrush = new SolidBrush(pal.TextPrimary))
-                g.DrawString("近 7 日趋势", headFont, titleBrush, cardRect.X + 12, cardRect.Y + 9);
-
-            if (focusIdx >= 0 && focusIdx < days.Count)
-            {
-                var fp = days[focusIdx];
-                string tip = string.Format("{0} {1} · {2} tok · {3} 会话",
-                    fp.DayLabel, fp.WeekdayLabel, MetricFormatter.ExactTokens(fp.Tokens), fp.ThreadCount);
-                using (var tipBrush = new SolidBrush(fp.IsToday ? pal.AccentBlue : pal.TextSecondary))
-                using (var rightFmt = new StringFormat { Alignment = StringAlignment.Far })
-                    g.DrawString(tip, subFont, tipBrush, cardRect.Right - 12, cardRect.Y + 9, rightFmt);
-            }
-
-            if (days.Count == 0) return;
-
-            long maxTok = 1;
-            for (int i = 0; i < days.Count; i++)
-            {
-                if (days[i].Tokens > maxTok) maxTok = days[i].Tokens;
-            }
-
-            int plotLeft = cardRect.X + 14;
-            int plotRight = cardRect.Right - 14;
-            int plotW = plotRight - plotLeft;
-            int slotW = plotW / days.Count;
-            int barW = Math.Min(34, Math.Max(18, slotW - 22));
-            int chartTop = cardRect.Y + 42;
-            int chartBottom = cardRect.Bottom - 34;
-            int maxBarH = Math.Max(20, chartBottom - chartTop);
-
-            // Subtle baseline
-            using (var basePen = new Pen(pal.Border, 1f))
-                g.DrawLine(basePen, plotLeft, chartBottom, plotRight, chartBottom);
-
-            Color idleBarCol = pal.Kind == CodexThemeKind.Dark
-                ? Color.FromArgb(175, 96, 165, 250)
-                : Color.FromArgb(165, 59, 130, 246);
-            Color activeBarCol = pal.AccentBlue;
-
-            using (var centerFmt = new StringFormat { Alignment = StringAlignment.Center })
-            using (var valFont = OverlayDpi.FontAt96Dpi("Segoe UI", 7.4f, FontStyle.Regular))
-            using (var dayFont = OverlayDpi.FontAt96Dpi("Microsoft YaHei UI", 7.6f, FontStyle.Regular))
-            using (var dayBoldFont = OverlayDpi.FontAt96Dpi("Microsoft YaHei UI", 7.6f, FontStyle.Bold))
-            using (var mutedBrush = new SolidBrush(pal.TextMuted))
-            using (var secBrush = new SolidBrush(pal.TextSecondary))
-            using (var priBrush = new SolidBrush(pal.TextPrimary))
-            using (var accentBrush = new SolidBrush(pal.AccentBlue))
-            {
-                for (int i = 0; i < days.Count; i++)
-                {
-                    var d = days[i];
-                    int sx = plotLeft + (i * slotW);
-                    var hitRect = new Rectangle(sx + 2, cardRect.Y + 28, slotW - 4, cardRect.Bottom - cardRect.Y - 32);
-                    dayBarRects[i] = hitRect;
-
-                    bool isHov = i == hoveredDay;
-                    bool isSel = i == selectedDay;
-                    if (isHov || isSel)
-                    {
-                        using (var hp = StripForm.CreateRoundedPath(hitRect, 5))
-                        using (var hb = new SolidBrush(isSel ? Color.FromArgb(20, pal.AccentBlue) : pal.RowHoverBg))
-                            g.FillPath(hb, hp);
-                    }
-
-                    int bx = sx + ((slotW - barW) / 2);
-                    int bh = d.Tokens > 0 ? Math.Max(5, (int)Math.Round(maxBarH * (d.Tokens / (double)maxTok))) : 2;
-                    int by = chartBottom - bh;
-
-                    var barRect = new Rectangle(bx, by, barW, bh);
-                    Color col = d.Tokens <= 0
-                        ? pal.TrackBg
-                        : ((d.IsToday || isHov || isSel) ? activeBarCol : idleBarCol);
-                    using (var bp = StripForm.CreateRoundedPath(barRect, Math.Min(4, bh / 2)))
-                    using (var bb = new SolidBrush(col))
-                        g.FillPath(bb, bp);
-
-                    string topVal = d.Tokens > 0 ? MetricFormatter.CompactTokens(d.Tokens) : "0";
-                    Brush vBrush = (d.IsToday || isHov || isSel) ? priBrush : mutedBrush;
-                    g.DrawString(topVal, valFont, vBrush, sx + (slotW / 2f), by - 14, centerFmt);
-
-                    g.DrawString(d.DayLabel, d.IsToday ? dayBoldFont : dayFont, d.IsToday ? accentBrush : secBrush,
-                        sx + (slotW / 2f), chartBottom + 4, centerFmt);
-                    g.DrawString(d.WeekdayLabel, valFont, mutedBrush,
-                        sx + (slotW / 2f), chartBottom + 18, centerFmt);
-                }
-            }
-        }
-
-        private static void DrawModelDistributionCard(
-            Graphics g, int width, int y, int sectionHeight, HistoryStatsSnapshot hist, ThemePalette pal,
-            Font labelFont, Font headFont, Font subFont, Font monoBoldFont)
-        {
-            var cardRect = new Rectangle(Pad, y + 2, width - (Pad * 2), sectionHeight - 8);
-            using (var cPath = StripForm.CreateRoundedPath(cardRect, 7))
-            using (var cFill = new SolidBrush(pal.CardBg))
-            using (var cPen = new Pen(pal.Border, 1f))
-            {
-                g.FillPath(cFill, cPath);
-                g.DrawPath(cPen, cPath);
-            }
-
-            int ix = cardRect.X + 12;
-            int iw = cardRect.Width - 24;
-
-            using (var titleBrush = new SolidBrush(pal.TextPrimary))
-                g.DrawString("按模型分布 (近 7 日)", headFont, titleBrush, ix, cardRect.Y + 9);
-
-            string allNote = string.Format("历史总计 {0} · {1} 会话",
-                MetricFormatter.CompactTokens(hist.AllTimeTokens), hist.AllTimeThreads);
-            using (var noteBrush = new SolidBrush(pal.TextMuted))
-            using (var rightFmt = new StringFormat { Alignment = StringAlignment.Far })
-                g.DrawString(allNote, subFont, noteBrush, cardRect.Right - 12, cardRect.Y + 9, rightFmt);
-
-            var models = hist.Models7d ?? new List<ModelUsageBucket>();
-            if (models.Count == 0 || hist.SevenDayTokens <= 0)
-            {
-                using (var emptyBrush = new SolidBrush(pal.TextMuted))
-                    g.DrawString("近 7 日暂无模型 Token 记录", labelFont, emptyBrush, ix, cardRect.Y + 38);
-                return;
-            }
-
-            // Prepare up to 4 display rows (fold tail into "其他模型")
-            var display = new List<ModelUsageBucket>();
-            if (models.Count <= 4)
-            {
-                display.AddRange(models);
-            }
-            else
-            {
-                for (int i = 0; i < 3; i++) display.Add(models[i]);
-                long otherTok = 0;
-                int otherCnt = 0;
-                for (int i = 3; i < models.Count; i++)
-                {
-                    otherTok += models[i].Tokens;
-                    otherCnt += models[i].ThreadCount;
-                }
-                display.Add(new ModelUsageBucket
-                {
-                    ModelName = "其他模型",
-                    Tokens = otherTok,
-                    ThreadCount = otherCnt,
-                    SharePct = hist.SevenDayTokens > 0 ? (otherTok * 100.0 / hist.SevenDayTokens) : 0.0
-                });
-            }
-
-            Color[] modelColors = new Color[]
-            {
-                pal.AccentBlue,
-                pal.CtxToolResults,
-                pal.CtxUserInput,
-                pal.CtxSystemTools
-            };
-
-            // Segmented horizontal bar
-            int barY = cardRect.Y + 30;
-            int barH = 7;
-            var trackRect = new Rectangle(ix, barY, iw, barH);
-            using (var tp = StripForm.CreateRoundedPath(trackRect, 3))
-            using (var tb = new SolidBrush(pal.TrackBg))
-                g.FillPath(tb, tp);
-
-            int gapPx = 2;
-            int totalGap = Math.Max(0, display.Count - 1) * gapPx;
-            int availPx = Math.Max(display.Count * 4, iw - totalGap);
-            int curX = ix;
-            for (int i = 0; i < display.Count && curX < ix + iw; i++)
-            {
-                int segW = (i == display.Count - 1)
-                    ? ((ix + iw) - curX)
-                    : Math.Max(5, (int)Math.Round(availPx * (display[i].Tokens / (double)hist.SevenDayTokens)));
-                if (curX + segW > ix + iw) segW = (ix + iw) - curX;
-                if (segW <= 0) break;
-                var segRect = new Rectangle(curX, barY, segW, barH);
-                using (var sp = StripForm.CreateRoundedPath(segRect, 3))
-                using (var sb = new SolidBrush(modelColors[i % modelColors.Length]))
-                    g.FillPath(sb, sp);
-                curX += segW + gapPx;
-            }
-
-            // Rows
-            int rowStartY = cardRect.Y + 44;
-            int rowStep = 20;
-            using (var priBrush = new SolidBrush(pal.TextPrimary))
-            using (var secBrush = new SolidBrush(pal.TextSecondary))
-            using (var mutedBrush = new SolidBrush(pal.TextMuted))
-            using (var rightFmt = new StringFormat { Alignment = StringAlignment.Far })
-            {
-                for (int i = 0; i < display.Count; i++)
-                {
-                    var m = display[i];
-                    int ry = rowStartY + (i * rowStep);
-                    Color col = modelColors[i % modelColors.Length];
-
-                    var sw = new Rectangle(ix, ry + 5, 7, 7);
-                    using (var swp = StripForm.CreateRoundedPath(sw, 2))
-                    using (var swb = new SolidBrush(col))
-                        g.FillPath(swb, swp);
-
-                    DrawSummaryText(g, MetricFormatter.FormatModelName(m.ModelName), subFont, priBrush,
-                        new Rectangle(ix + 13, ry, cardRect.Right - 190 - ix - 13, 16));
-
-                    // Mini progress track in middle
-                    int barLeft = ix + 150;
-                    int miniW = 128;
-                    var miniTrack = new Rectangle(barLeft, ry + 6, miniW, 5);
-                    using (var mtp = StripForm.CreateRoundedPath(miniTrack, 2))
-                    using (var mtb = new SolidBrush(pal.TrackBg))
-                        g.FillPath(mtb, mtp);
-                    int mfw = Math.Max(4, (int)Math.Round(miniW * Math.Min(100.0, m.SharePct) / 100.0));
-                    var miniFill = new Rectangle(barLeft, ry + 6, Math.Min(miniW, mfw), 5);
-                    using (var mfp = StripForm.CreateRoundedPath(miniFill, 2))
-                    using (var mfb = new SolidBrush(col))
-                        g.FillPath(mfb, mfp);
-
-                    g.DrawString(MetricFormatter.CompactTokens(m.Tokens), monoBoldFont, priBrush, cardRect.Right - 110, ry + 1, rightFmt);
-                    g.DrawString(string.Format("{0:0.0}%", m.SharePct), subFont, secBrush, cardRect.Right - 60, ry + 1, rightFmt);
-                    g.DrawString(string.Format("{0} 会话", m.ThreadCount), subFont, mutedBrush, cardRect.Right - 12, ry + 1, rightFmt);
-                }
-            }
-        }
-
         private static void DrawTopThreadsCard(
             Graphics g, int width, int y, HistoryStatsSnapshot hist, ThemePalette pal,
             Font labelFont, Font headFont, Font subFont, Font monoFont, Font monoBoldFont)
@@ -1334,16 +992,16 @@ namespace CodexInputUsage
 
             int ix = cardRect.X + 12;
             using (var titleBrush = new SolidBrush(pal.TextPrimary))
-                g.DrawString("近 7 日高消耗会话", headFont, titleBrush, ix, cardRect.Y + 9);
+                g.DrawString("高消耗会话 · Top 5", headFont, titleBrush, ix, cardRect.Y + 9);
             using (var hintBrush = new SolidBrush(pal.TextMuted))
             using (var rightFmt = new StringFormat { Alignment = StringAlignment.Far })
-                g.DrawString("按会话最后活跃日汇总", subFont, hintBrush, cardRect.Right - 12, cardRect.Y + 9, rightFmt);
+                g.DrawString("按所选时段统计", subFont, hintBrush, cardRect.Right - 12, cardRect.Y + 9, rightFmt);
 
-            var top = hist.TopThreads7d ?? new List<TopThreadItem>();
-            if (top.Count == 0)
+            var top = hist.TopThreads;
+            if (top.Length == 0)
             {
                 using (var emptyBrush = new SolidBrush(pal.TextMuted))
-                    g.DrawString("近 7 日暂无活跃会话记录", labelFont, emptyBrush, ix, cardRect.Y + 38);
+                    g.DrawString("所选时段暂无活跃会话", labelFont, emptyBrush, ix, cardRect.Y + 38);
                 return;
             }
 
@@ -1357,7 +1015,7 @@ namespace CodexInputUsage
             using (var rightFmt = new StringFormat { Alignment = StringAlignment.Far })
             using (var ellipFmt = new StringFormat { Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap })
             {
-                for (int i = 0; i < Math.Min(5, top.Count); i++)
+                for (int i = 0; i < top.Length; i++)
                 {
                     var item = top[i];
                     int ry = rowStartY + (i * rowH);

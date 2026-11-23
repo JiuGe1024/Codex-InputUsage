@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -312,7 +312,7 @@ namespace CodexInputUsage
             internal long End;
         }
 
-        private sealed class UsageBag
+        internal sealed class UsageBag
         {
             internal long Input;
             internal long Cached;
@@ -1306,7 +1306,7 @@ namespace CodexInputUsage
                 || string.Equals(itemType, "ImageGeneration", StringComparison.OrdinalIgnoreCase);
         }
 
-        private static long? ParseTimestampMs(string ts)
+        internal static long? ParseTimestampMs(string ts)
         {
             DateTime parsed;
             if (string.IsNullOrWhiteSpace(ts)) return null;
@@ -1316,7 +1316,7 @@ namespace CodexInputUsage
             return (long)(parsed - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
         }
 
-        private static UsageBag ParseUsage(Dictionary<string, object> dict)
+        internal static UsageBag ParseUsage(Dictionary<string, object> dict)
         {
             if (dict == null) return null;
             long? inp = GetLong(dict, "input_tokens");
@@ -1335,13 +1335,13 @@ namespace CodexInputUsage
             };
         }
 
-        private static string GetStr(Dictionary<string, object> d, string k)
+        internal static string GetStr(Dictionary<string, object> d, string k)
         {
             object v;
             return d != null && d.TryGetValue(k, out v) ? v as string : null;
         }
 
-        private static Dictionary<string, object> GetDict(Dictionary<string, object> d, string k)
+        internal static Dictionary<string, object> GetDict(Dictionary<string, object> d, string k)
         {
             object v;
             return d != null && d.TryGetValue(k, out v) ? v as Dictionary<string, object> : null;
