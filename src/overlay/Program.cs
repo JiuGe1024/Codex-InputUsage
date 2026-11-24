@@ -479,8 +479,65 @@ namespace CodexInputUsage
                     OverlayDpi.Pixels(160, scale), OverlayDpi.Pixels(92, scale)), scale));
             }
             sb.AppendLine(string.Format("dpi_tests logicalHit={0} workArea={1}", dpiHit, dpiBounds));
+            bool dockPerfOk = CheckDockPerformance(sb);
             File.WriteAllText(Path.Combine(workDir, "selftest-report.txt"), sb.ToString(), Encoding.UTF8);
-            if (!quotaFuture || !quotaReset || !quotaMissing || !dpiHit || !dpiBounds || !stripStyleOk || !modelNameOk || !turnsSummaryOk || !usageStatsOk) Environment.ExitCode = 1;
+            if (!quotaFuture || !quotaReset || !quotaMissing || !dpiHit || !dpiBounds || !stripStyleOk || !modelNameOk || !turnsSummaryOk || !usageStatsOk || !dockPerfOk) Environment.ExitCode = 1;
+        }
+
+        private static bool CheckDockPerformance(StringBuilder report)
+        {
+            var anchor = new ComposerDockSnapshot
+            {
+                WindowHandle = new IntPtr(1),
+                Source = DockSourceKind.UiaContext,
+                WindowRect = new Rectangle(50, 100, 1200, 800),
+                ReferenceRect = new Rectangle(900, 820, 30, 30),
+                RowRect = new Rectangle(940, 820, 70, 30),
+                ComposerRect = new Rectangle(400, 740, 650, 120),
+                LeftBarrierX = 470,
+                HeaderTexts = new[] { "原会话标题" },
+                BodyTexts = new[] { "原会话正文" }
+            };
+            var degraded = new ComposerDockSnapshot
+            {
+                WindowHandle = anchor.WindowHandle, WindowRect = anchor.WindowRect, Source = DockSourceKind.UiaComposer
+            };
+
+            long? started = null;
+            bool holdsTransient = ComposerDockTracker.HoldPreviousAnchor(anchor, degraded, 5000, ref started);
+            degraded.Source = DockSourceKind.None;
+            holdsTransient &= ComposerDockTracker.HoldPreviousAnchor(anchor, degraded, 5349, ref started);
+            bool expires = !ComposerDockTracker.HoldPreviousAnchor(anchor, degraded, 5350, ref started);
+            bool resets = !ComposerDockTracker.HoldPreviousAnchor(anchor, anchor, 5360, ref started) && !started.HasValue;
+            resets &= ComposerDockTracker.HoldPreviousAnchor(anchor, degraded, 6000, ref started);
+
+            var resized = new Rectangle(50, 100, 1000, 800);
+            degraded.WindowRect = resized;
+            bool bypasses = !ComposerDockTracker.HoldPreviousAnchor(anchor, degraded, 6010, ref started);
+            degraded.WindowRect = anchor.WindowRect;
+            degraded.WindowHandle = new IntPtr(2);
+            bypasses &= !ComposerDockTracker.HoldPreviousAnchor(anchor, degraded, 6020, ref started);
+            degraded.WindowHandle = anchor.WindowHandle;
+            degraded.DpiScale = 1.5f;
+            bypasses &= !ComposerDockTracker.HoldPreviousAnchor(anchor, degraded, 6030, ref started);
+
+            bool waitsForResize = anchor.ForLiveWindow(resized) == null;
+            var moved = anchor.ForLiveWindow(new Rectangle(80, 80, 1200, 800));
+            bool translates = moved.ReferenceRect.Location == new Point(930, 800)
+                && moved.ComposerRect.Location == new Point(430, 720)
+                && moved.RowRect.Location == new Point(970, 800) && moved.LeftBarrierX == 500;
+
+            var sameWindowGeometry = new ComposerDockSnapshot { WindowHandle = anchor.WindowHandle, ReferenceRect = moved.ReferenceRect };
+            var merged = sameWindowGeometry.KeepFingerprints(anchor);
+            bool keepsFingerprints = merged.HeaderTexts == anchor.HeaderTexts && merged.BodyTexts == anchor.BodyTexts
+                && merged.ReferenceRect == moved.ReferenceRect && sameWindowGeometry.HeaderTexts.Length == 0;
+            var otherWindow = new ComposerDockSnapshot { WindowHandle = new IntPtr(2) };
+            var switched = otherWindow.KeepFingerprints(merged);
+            bool clearsFingerprints = switched.HeaderTexts.Length == 0 && switched.BodyTexts.Length == 0;
+
+            report.AppendLine(string.Format("dock_perf_tests holdsTransient={0} expires={1} resets={2} bypasses={3} waitsForResize={4} translates={5} keepsFingerprints={6} clearsFingerprints={7}",
+                holdsTransient, expires, resets, bypasses, waitsForResize, translates, keepsFingerprints, clearsFingerprints));
+            return holdsTransient && expires && resets && bypasses && waitsForResize && translates && keepsFingerprints && clearsFingerprints;
         }
 
         private static bool CheckModelNames(StringBuilder report)
@@ -717,6 +774,8 @@ namespace CodexInputUsage
             private int _rolloutDirtyFlag;
 
             private volatile IntPtr _activeCodexHwnd = IntPtr.Zero;
+            private IntPtr _metricsWindowHandle;
+            private IntPtr _anchorWindowHandle;
             private SessionMetricsSnapshot _lastMetrics = new SessionMetricsSnapshot();
             private Rectangle _lastStripBounds = Rectangle.Empty;
             private Rectangle _anchorWindowRect = Rectangle.Empty;
@@ -862,7 +921,7 @@ namespace CodexInputUsage
             private void OnTrackedWindowMoved(object sender, EventArgs e)
             {
                 IntPtr hwnd = _activeCodexHwnd;
-                if (hwnd == IntPtr.Zero || !_strip.Visible || _anchorWindowRect.IsEmpty || _anchorStripBounds.IsEmpty)
+                if (hwnd == IntPtr.Zero || hwnd != _anchorWindowHandle || !_strip.Visible || _anchorWindowRect.IsEmpty || _anchorStripBounds.IsEmpty)
                     return;
 
                 Rectangle curWin = NativeWin32.GetWindowRectangle(hwnd);
@@ -1001,6 +1060,8 @@ namespace CodexInputUsage
                 _hostEvents.SetTrackedWindow(IntPtr.Zero);
                 WatchRolloutFile(null);
                 if (_ipc.IsRunning) _ipc.Stop();
+                _dockTracker.SetSessionBound(false);
+                _metricsWindowHandle = IntPtr.Zero;
                 _rollout.Reset(null, "等待", null);
                 _lastMetrics = _rollout.BuildSnapshot();
                 _strip.HideStrip();
@@ -1098,41 +1159,34 @@ namespace CodexInputUsage
                     return;
                 }
 
-                if (dock.DpiScale != NativeWin32.GetWindowDpiScale(fgCodex))
+                var effectiveDock = dock.ForLiveWindow(NativeWin32.GetWindowRectangle(fgCodex));
+                bool sameDpi = dock.DpiScale == NativeWin32.GetWindowDpiScale(fgCodex);
+                if (effectiveDock == null || !sameDpi)
                 {
+                    if (sameDpi && !gainedFocus && !fromForegroundEvent && _strip.Visible && _anchorWindowHandle == fgCodex)
+                    {
+                        OnTrackedWindowMoved(this, EventArgs.Empty);
+                        return;
+                    }
+                    _strip.HideStrip();
+                    if (_popover.Visible) _popover.Hide();
                     _dockTracker.WakeNow(true, false);
                     return;
                 }
 
-                // Adjust cached dock snapshot instantly if Codex was moved while in the background
-                Rectangle liveWinRect = NativeWin32.GetWindowRectangle(fgCodex);
-                ComposerDockSnapshot effectiveDock = dock;
-                if (!liveWinRect.IsEmpty && !dock.WindowRect.IsEmpty && liveWinRect != dock.WindowRect)
-                {
-                    if (liveWinRect.Size == dock.WindowRect.Size)
-                    {
-                        int dx = liveWinRect.X - dock.WindowRect.X;
-                        int dy = liveWinRect.Y - dock.WindowRect.Y;
-                        effectiveDock = new ComposerDockSnapshot
-                        {
-                            WindowHandle = dock.WindowHandle,
-                            DpiScale = dock.DpiScale,
-                            Source = dock.Source,
-                            ReferenceRect = OffsetRect(dock.ReferenceRect, dx, dy),
-                            RowRect = OffsetRect(dock.RowRect, dx, dy),
-                            ComposerRect = OffsetRect(dock.ComposerRect, dx, dy),
-                            WindowRect = liveWinRect,
-                            LeftBarrierX = dock.LeftBarrierX + dx,
-                            HeaderTexts = dock.HeaderTexts,
-                            BodyTexts = dock.BodyTexts,
-                            Detail = dock.Detail
-                        };
-                    }
-                    else
-                    {
-                        _dockTracker.WakeNow(true, false);
-                    }
-                }
+                // Apply the current anchor before reading session state or touching disk.
+                ThemePalette pal = ThemePalette.For(CodexThemeSource.Current);
+                Rectangle placed;
+                string variant;
+                bool newMetricsWindow = _metricsWindowHandle != fgCodex;
+                bool firstPlacement = !_strip.Visible || gainedFocus;
+                var displayedMetrics = newMetricsWindow ? new SessionMetricsSnapshot() : _lastMetrics;
+                bool shown = _strip.ApplyDockedState(effectiveDock, displayedMetrics, _slotPrefs, pal, out placed, out variant);
+                if (shown && firstPlacement)
+                    Program.LogDiag(string.Format("anchor-applied:{0} bounds={1} geometryMs={2} fpMs={3}",
+                        effectiveDock.Source, placed, effectiveDock.GeometryMs, effectiveDock.FingerprintMs));
+                if (_popoverWanted && _popover.Visible && shown && placed != _lastStripBounds)
+                    _popover.PositionAbove(placed);
 
                 var ipcSt = _ipc.GetStatus();
                 string fpSig = ipcSt.Version + "|" + string.Join("\u001f", effectiveDock.HeaderTexts ?? new string[0])
@@ -1140,11 +1194,13 @@ namespace CodexInputUsage
                 bool fpChanged = !string.Equals(fpSig, _lastFingerprintSig, StringComparison.Ordinal);
                 bool rolloutDirty = Interlocked.Exchange(ref _rolloutDirtyFlag, 0) != 0;
 
-                if (fpChanged || rolloutDirty || (now - _lastMetricsPollUtc).TotalMilliseconds >= 450.0)
+                if (newMetricsWindow || fpChanged || rolloutDirty || (now - _lastMetricsPollUtc).TotalMilliseconds >= 450.0)
                 {
+                    _metricsWindowHandle = fgCodex;
                     _lastFingerprintSig = fpSig;
                     _lastMetricsPollUtc = now;
                     SessionMatchResult matched = _matcher.Resolve(ipcSt, effectiveDock.HeaderTexts, effectiveDock.BodyTexts);
+                    _dockTracker.SetSessionBound(matched.ThreadId != null);
                     _lastMatchDetail = matched.Detail ?? matched.Source;
                     WatchRolloutFile(matched.RolloutPath);
 
@@ -1164,12 +1220,9 @@ namespace CodexInputUsage
                     {
                         AccountQuotaReader.ApplyToSnapshot(_lastMetrics, liveQuota);
                     }
+                    shown = _strip.ApplyDockedState(effectiveDock, _lastMetrics, _slotPrefs, pal, out placed, out variant);
                 }
 
-                ThemePalette pal = ThemePalette.For(CodexThemeSource.Current);
-                Rectangle placed;
-                string variant;
-                bool shown = _strip.ApplyDockedState(effectiveDock, _lastMetrics, _slotPrefs, pal, out placed, out variant);
                 if (!shown)
                 {
                     LogState("dock-no-space:" + effectiveDock.Detail);
@@ -1178,13 +1231,15 @@ namespace CodexInputUsage
                 }
 
                 _lastStripBounds = placed;
+                _anchorWindowHandle = fgCodex;
                 _anchorWindowRect = effectiveDock.WindowRect;
                 _anchorStripBounds = placed;
                 _anchorDpiScale = effectiveDock.DpiScale;
 
                 LogState(string.Format("docked:{0} bounds={1} text=\"{2}\" thread={3}({4}) match=[{5}]",
                     effectiveDock.Source, placed, variant, MetricFormatter.ShortThreadId(_lastMetrics.ThreadId),
-                    _lastMetrics.BindingSource, _lastMatchDetail));
+                    _lastMetrics.BindingSource, _lastMatchDetail),
+                    string.Format(" geometryMs={0} fpMs={1}", effectiveDock.GeometryMs, effectiveDock.FingerprintMs));
 
                 if (_popoverWanted)
                 {
@@ -1201,19 +1256,14 @@ namespace CodexInputUsage
                 }
             }
 
-            private static Rectangle OffsetRect(Rectangle r, int dx, int dy)
-            {
-                return r.IsEmpty ? r : new Rectangle(r.X + dx, r.Y + dy, r.Width, r.Height);
-            }
-
-            private void LogState(string state)
+            private void LogState(string state, string timing = null)
             {
                 var now = DateTime.UtcNow;
                 if (state != _lastDiagState || (now - _lastHeartbeatUtc).TotalSeconds >= 8.0)
                 {
                     _lastDiagState = state;
                     _lastHeartbeatUtc = now;
-                    Program.LogDiag(state);
+                    Program.LogDiag(state + timing);
                 }
             }
 

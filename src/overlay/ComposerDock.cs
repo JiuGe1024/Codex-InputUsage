@@ -32,6 +32,46 @@ namespace CodexInputUsage
         internal string[] HeaderTexts = new string[0];
         internal string[] BodyTexts = new string[0];
         internal string Detail;
+        internal long GeometryMs;
+        internal long FingerprintMs;
+
+        internal ComposerDockSnapshot WithFingerprints(string[] headers, string[] bodies, long elapsedMs)
+        {
+            var snapshot = (ComposerDockSnapshot)MemberwiseClone();
+            snapshot.HeaderTexts = headers;
+            snapshot.BodyTexts = bodies;
+            snapshot.FingerprintMs = elapsedMs;
+            return snapshot;
+        }
+
+        internal ComposerDockSnapshot KeepFingerprints(ComposerDockSnapshot previous)
+        {
+            return WindowHandle == previous.WindowHandle
+                ? WithFingerprints(previous.HeaderTexts, previous.BodyTexts, previous.FingerprintMs)
+                : this;
+        }
+
+        internal ComposerDockSnapshot ForLiveWindow(Rectangle live)
+        {
+            if (live.IsEmpty || live.Size != WindowRect.Size) return null;
+            if (live == WindowRect) return this;
+
+            int dx = live.X - WindowRect.X;
+            int dy = live.Y - WindowRect.Y;
+            var snapshot = (ComposerDockSnapshot)MemberwiseClone();
+            snapshot.ReferenceRect = Offset(ReferenceRect, dx, dy);
+            snapshot.RowRect = Offset(RowRect, dx, dy);
+            snapshot.ComposerRect = Offset(ComposerRect, dx, dy);
+            snapshot.LeftBarrierX += dx;
+            snapshot.WindowRect = live;
+            return snapshot;
+        }
+
+        private static Rectangle Offset(Rectangle rect, int dx, int dy)
+        {
+            if (!rect.IsEmpty) rect.Offset(dx, dy);
+            return rect;
+        }
 
         internal static readonly ComposerDockSnapshot Empty = new ComposerDockSnapshot
         {
@@ -290,20 +330,25 @@ namespace CodexInputUsage
         private sealed class ChildInfo
         {
             internal AutomationElement Element;
-            internal int Index;
             internal Rectangle Rect;
             internal string ControlType;
             internal string Name;
             internal string ClassName;
+            internal bool HasCache;
         }
 
         private readonly Func<IntPtr> _windowProvider;
         private readonly CancellationTokenSource _cts = new CancellationTokenSource();
         private readonly AutoResetEvent _wakeSignal = new AutoResetEvent(false);
+        private readonly AutoResetEvent _fingerprintSignal = new AutoResetEvent(false);
+        private readonly object _snapshotGate = new object();
         private Thread _thread;
+        private Thread _fingerprintThread;
         private volatile ComposerDockSnapshot _latest = ComposerDockSnapshot.Empty;
+        private volatile bool _sessionBound;
+        private bool _disposed;
         private int _forceFullWalkFlag;
-        private int _forceFingerprintFlag;
+        private int _fingerprintVersion;
 
         internal event EventHandler SnapshotUpdated;
 
@@ -314,31 +359,59 @@ namespace CodexInputUsage
 
         internal ComposerDockSnapshot Latest { get { return _latest; } }
 
+        internal void SetSessionBound(bool bound)
+        {
+            if (_sessionBound == bound) return;
+            _sessionBound = bound;
+            if (!bound) WakeNow(false, true);
+        }
+
         internal void WakeNow(bool forceFullWalk, bool forceFingerprint)
         {
-            if (forceFullWalk) Interlocked.Exchange(ref _forceFullWalkFlag, 1);
-            if (forceFingerprint) Interlocked.Exchange(ref _forceFingerprintFlag, 1);
-            try { _wakeSignal.Set(); } catch { }
+            lock (_snapshotGate)
+            {
+                if (_disposed) return;
+                if (forceFullWalk) Interlocked.Exchange(ref _forceFullWalkFlag, 1);
+                if (forceFingerprint)
+                {
+                    _fingerprintVersion++;
+                    _fingerprintSignal.Set();
+                }
+                _wakeSignal.Set();
+            }
         }
 
         internal void Start()
         {
             if (_thread != null) return;
-            _thread = new Thread(RunLoop)
-            {
-                IsBackground = true,
-                Name = "CodexInputUsage.ComposerDock"
-            };
-            _thread.SetApartmentState(ApartmentState.MTA);
-            _thread.Start();
+            _thread = StartWorker(RunLoop, "ComposerDock");
+            _fingerprintThread = StartWorker(RunFingerprints, "ChatFingerprints");
+        }
+
+        private static Thread StartWorker(ThreadStart run, string name)
+        {
+            var thread = new Thread(run) { IsBackground = true, Name = "CodexInputUsage." + name };
+            thread.SetApartmentState(ApartmentState.MTA);
+            thread.Start();
+            return thread;
         }
 
         public void Dispose()
         {
-            try { _cts.Cancel(); } catch { }
-            try { _wakeSignal.Set(); } catch { }
-            try { _cts.Dispose(); } catch { }
-            try { _wakeSignal.Dispose(); } catch { }
+            lock (_snapshotGate)
+            {
+                if (_disposed) return;
+                _disposed = true;
+                _cts.Cancel();
+                _wakeSignal.Set();
+                _fingerprintSignal.Set();
+            }
+            // A UIA provider call may already be in flight. Keep both signals alive until the workers exit.
+            if (_thread != null) _thread.Join();
+            if (_fingerprintThread != null) _fingerprintThread.Join();
+            _wakeSignal.Dispose();
+            _fingerprintSignal.Dispose();
+            _cts.Dispose();
         }
 
         internal static ComposerDockSnapshot MeasureOnce(IntPtr hwnd)
@@ -349,133 +422,213 @@ namespace CodexInputUsage
             return Discover(hwnd, ref composer, ref contextEl, ref modelEl);
         }
 
+        internal static bool HoldPreviousAnchor(ComposerDockSnapshot previous, ComposerDockSnapshot next,
+            long nowMs, ref long? degradedSinceMs)
+        {
+            bool degraded = (next.Source == DockSourceKind.None || next.Source == DockSourceKind.UiaComposer)
+                && (previous.Source == DockSourceKind.UiaContext || previous.Source == DockSourceKind.UiaModel)
+                && next.WindowHandle == previous.WindowHandle
+                && next.WindowRect == previous.WindowRect
+                && next.DpiScale == previous.DpiScale;
+            if (!degraded)
+            {
+                degradedSinceMs = null;
+                return false;
+            }
+
+            if (!degradedSinceMs.HasValue) degradedSinceMs = nowMs;
+            return nowMs - degradedSinceMs.Value < 350;
+        }
+
+        private void PublishGeometry(ComposerDockSnapshot snapshot)
+        {
+            lock (_snapshotGate)
+            {
+                if (_disposed || snapshot.WindowHandle != _windowProvider()) return;
+                if (snapshot.WindowHandle != _latest.WindowHandle)
+                {
+                    _sessionBound = false;
+                    _fingerprintVersion++;
+                }
+                bool firstUsableGeometry = snapshot.Source != DockSourceKind.None
+                    && (_latest.Source == DockSourceKind.None || snapshot.WindowHandle != _latest.WindowHandle);
+                _latest = snapshot.KeepFingerprints(_latest);
+                if (firstUsableGeometry) _fingerprintSignal.Set();
+            }
+            NotifySnapshotUpdated();
+        }
+
+        private void NotifySnapshotUpdated()
+        {
+            var handler = SnapshotUpdated;
+            if (handler != null) handler(this, EventArgs.Empty);
+        }
+
         private void RunLoop()
         {
             AutomationElement composer = null;
             AutomationElement contextEl = null;
             AutomationElement modelEl = null;
             IntPtr trackedHwnd = IntPtr.Zero;
-            Rectangle lastRefRect = Rectangle.Empty;
-            DateTime lastFullWalkUtc = DateTime.MinValue;
-            DateTime lastFingerprintUtc = DateTime.MinValue;
-            CancellationToken token = _cts.Token;
+            var clock = Stopwatch.StartNew();
+            long lastDiscoveryMs = -12000;
+            long? degradedSinceMs = null;
+            var token = _cts.Token;
 
             while (!token.IsCancellationRequested)
             {
-                try
+                IntPtr hwnd = _windowProvider();
+                if (hwnd == IntPtr.Zero)
                 {
-                    IntPtr hwnd = _windowProvider();
-                    if (hwnd == IntPtr.Zero)
+                    _wakeSignal.WaitOne(220);
+                    continue;
+                }
+
+                if (trackedHwnd != hwnd || _latest.WindowHandle != hwnd)
+                {
+                    trackedHwnd = hwnd;
+                    composer = contextEl = modelEl = null;
+                    degradedSinceMs = null;
+                    PublishGeometry(new ComposerDockSnapshot { WindowHandle = hwnd, Detail = "new-window" });
+                }
+
+                var previous = _latest;
+                Rectangle window = NativeWin32.GetWindowRectangle(hwnd);
+                if (window.IsEmpty)
+                {
+                    _wakeSignal.WaitOne(50);
+                    continue;
+                }
+                float scale = NativeWin32.GetWindowDpiScale(hwnd);
+                bool needDiscovery = Interlocked.Exchange(ref _forceFullWalkFlag, 0) != 0
+                    || composer == null || (contextEl == null && modelEl == null)
+                    || scale != previous.DpiScale || clock.ElapsedMilliseconds - lastDiscoveryMs >= 12000;
+                var elapsed = Stopwatch.StartNew();
+
+                if (!needDiscovery)
+                {
+                    Rectangle reference;
+                    Rectangle composerRect;
+                    Rectangle row;
+                    AutomationElement anchor = contextEl ?? modelEl;
+                    if (!TryReadRect(anchor, out reference))
                     {
-                        // Keep cached _latest so Alt-Tab back to the same Codex window renders on frame 1!
-                        _wakeSignal.WaitOne(220);
-                        continue;
+                        needDiscovery = true;
                     }
-
-                    bool requestedFullWalk = Interlocked.Exchange(ref _forceFullWalkFlag, 0) != 0;
-                    bool requestedFp = Interlocked.Exchange(ref _forceFingerprintFlag, 0) != 0;
-
-                    bool needFullWalk = requestedFullWalk
-                        || hwnd != trackedHwnd
-                        || composer == null
-                        || (contextEl == null && modelEl == null)
-                        || (DateTime.UtcNow - lastFullWalkUtc).TotalSeconds >= 12.0;
-
-                    if (!needFullWalk)
+                    else if (reference != previous.ReferenceRect || window != previous.WindowRect)
                     {
-                        // Fast path: 1 cross-process UIA bounding rect read!
-                        AutomationElement fastEl = contextEl ?? modelEl;
-                        Rectangle curRect;
-                        if (TryReadRect(fastEl, out curRect))
+                        row = reference;
+                        if (!TryReadRect(composer, out composerRect)
+                            || (contextEl != null && modelEl != null && !TryReadRect(modelEl, out row)))
                         {
-                            if (curRect != lastRefRect)
-                            {
-                                needFullWalk = true;
-                            }
-                            else
-                            {
-                                var curSnap = _latest;
-                                if (curSnap != null && curSnap.WindowHandle == hwnd)
-                                {
-                                    Rectangle winRect = NativeWin32.GetWindowRectangle(hwnd);
-                                    if (winRect != curSnap.WindowRect || NativeWin32.GetWindowDpiScale(hwnd) != curSnap.DpiScale)
-                                    {
-                                        needFullWalk = true;
-                                    }
-                                    else if (requestedFp || (DateTime.UtcNow - lastFingerprintUtc).TotalMilliseconds >= 300.0)
-                                    {
-                                        string[] hdrs, bodies;
-                                        CollectChatFingerprints(hwnd, winRect, curSnap.ComposerRect, curSnap.DpiScale, out hdrs, out bodies);
-                                        lastFingerprintUtc = DateTime.UtcNow;
-                                        _latest = new ComposerDockSnapshot
-                                        {
-                                            WindowHandle = curSnap.WindowHandle,
-                                            DpiScale = curSnap.DpiScale,
-                                            Source = curSnap.Source,
-                                            ReferenceRect = curSnap.ReferenceRect,
-                                            RowRect = curSnap.RowRect,
-                                            ComposerRect = curSnap.ComposerRect,
-                                            WindowRect = curSnap.WindowRect,
-                                            LeftBarrierX = curSnap.LeftBarrierX,
-                                            HeaderTexts = hdrs,
-                                            BodyTexts = bodies,
-                                            Detail = curSnap.Detail
-                                        };
-                                        if (SnapshotUpdated != null) SnapshotUpdated(this, EventArgs.Empty);
-                                    }
-                                }
-                            }
+                            needDiscovery = true;
                         }
                         else
                         {
-                            needFullWalk = true;
-                        }
-                    }
-
-                    if (needFullWalk)
-                    {
-                        trackedHwnd = hwnd;
-                        var prevSnap = _latest;
-                        var snap = Discover(hwnd, ref composer, ref contextEl, ref modelEl);
-
-                        // Guard against single-frame React relayout glitches (e.g. children=0 or brief unmount)
-                        // when the window handle & geometry are unchanged: hold the previous valid anchor briefly.
-                        bool degraded = (snap.Source == DockSourceKind.None || snap.Source == DockSourceKind.UiaComposer)
-                            && prevSnap != null
-                            && prevSnap.WindowHandle == hwnd
-                            && (prevSnap.Source == DockSourceKind.UiaContext || prevSnap.Source == DockSourceKind.UiaModel)
-                            && prevSnap.WindowRect == snap.WindowRect
-                            && prevSnap.DpiScale == snap.DpiScale
-                            && (DateTime.UtcNow - lastFullWalkUtc).TotalMilliseconds < 1200.0;
-
-                        if (!degraded)
-                        {
-                            if (!snap.ComposerRect.IsEmpty && !snap.WindowRect.IsEmpty)
+                            var next = new ComposerDockSnapshot
                             {
-                                string[] hdrs, bodies;
-                                CollectChatFingerprints(hwnd, snap.WindowRect, snap.ComposerRect, snap.DpiScale, out hdrs, out bodies);
-                                snap.HeaderTexts = hdrs;
-                                snap.BodyTexts = bodies;
-                                lastFingerprintUtc = DateTime.UtcNow;
-                            }
-                            _latest = snap;
-                            lastRefRect = snap.ReferenceRect;
-                            if (snap.Source == DockSourceKind.UiaContext || snap.Source == DockSourceKind.UiaModel)
-                                lastFullWalkUtc = DateTime.UtcNow;
-                            if (SnapshotUpdated != null) SnapshotUpdated(this, EventArgs.Empty);
+                                WindowHandle = hwnd,
+                                WindowRect = window,
+                                DpiScale = scale,
+                                ComposerRect = composerRect,
+                                ReferenceRect = reference,
+                                RowRect = row,
+                                Source = previous.Source,
+                                LeftBarrierX = previous.LeftBarrierX + composerRect.Left - previous.ComposerRect.Left,
+                                GeometryMs = elapsed.ElapsedMilliseconds,
+                                Detail = "fast-rect"
+                            };
+                            PublishGeometry(next);
+                            needDiscovery = Math.Abs(composerRect.Width - previous.ComposerRect.Width) >= OverlayDpi.Pixels(12, scale)
+                                || window.Size != previous.WindowRect.Size;
                         }
                     }
                 }
-                catch
+
+                if (needDiscovery)
                 {
-                    composer = null;
-                    contextEl = null;
-                    modelEl = null;
+                    elapsed.Restart();
+                    var next = Discover(hwnd, ref composer, ref contextEl, ref modelEl);
+                    next.GeometryMs = elapsed.ElapsedMilliseconds;
+                    lastDiscoveryMs = clock.ElapsedMilliseconds;
+                    if (HoldPreviousAnchor(_latest, next, lastDiscoveryMs, ref degradedSinceMs))
+                    {
+                        _wakeSignal.WaitOne(30);
+                        continue;
+                    }
+
+                    degradedSinceMs = null;
+                    PublishGeometry(next);
                 }
 
-                try { _wakeSignal.WaitOne(140); }
-                catch { break; }
+                _wakeSignal.WaitOne(50);
             }
+        }
+
+        private void RunFingerprints()
+        {
+            var token = _cts.Token;
+            var clock = Stopwatch.StartNew();
+            long nextScanMs = 0;
+            int scannedVersion = -1;
+            var titleElements = new List<Tuple<AutomationElement, string>>();
+            while (!token.IsCancellationRequested)
+            {
+                ComposerDockSnapshot geometry;
+                int version;
+                lock (_snapshotGate)
+                {
+                    geometry = _latest;
+                    version = _fingerprintVersion;
+                }
+
+                if (geometry.WindowHandle == _windowProvider() && geometry.Source != DockSourceKind.None)
+                {
+                    if (version != scannedVersion || clock.ElapsedMilliseconds >= nextScanMs || TitleChanged(titleElements))
+                    {
+                        var elapsed = Stopwatch.StartNew();
+                        string[] headers, bodies;
+                        CollectChatFingerprints(geometry.WindowHandle, geometry.WindowRect, geometry.ComposerRect,
+                            geometry.DpiScale, titleElements, out headers, out bodies);
+                        nextScanMs = clock.ElapsedMilliseconds + (_sessionBound ? 800 : 300);
+
+                        lock (_snapshotGate)
+                        {
+                            if (_disposed || version != _fingerprintVersion || geometry.WindowHandle != _windowProvider()
+                                || _latest.Source == DockSourceKind.None || _latest.WindowHandle != geometry.WindowHandle
+                                || _latest.WindowRect.Size != geometry.WindowRect.Size || _latest.DpiScale != geometry.DpiScale)
+                            {
+                                scannedVersion = -1;
+                                continue;
+                            }
+                            scannedVersion = version;
+                            _latest = _latest.WithFingerprints(headers, bodies, elapsed.ElapsedMilliseconds);
+                        }
+                        NotifySnapshotUpdated();
+                    }
+                    long remainingMs = nextScanMs - clock.ElapsedMilliseconds;
+                    _fingerprintSignal.WaitOne((int)Math.Max(0, Math.Min(300, remainingMs)));
+                }
+                else
+                {
+                    _fingerprintSignal.WaitOne(220);
+                }
+            }
+        }
+
+        private static bool TitleChanged(List<Tuple<AutomationElement, string>> titles)
+        {
+            foreach (var title in titles)
+            {
+                try
+                {
+                    if (!string.Equals(title.Item1.Current.Name, title.Item2, StringComparison.Ordinal))
+                        return true;
+                }
+                catch (ElementNotAvailableException) { return true; }
+                catch (COMException) { return true; }
+            }
+            return false;
         }
 
         private static ComposerDockSnapshot Discover(
@@ -485,23 +638,27 @@ namespace CodexInputUsage
             ref AutomationElement modelEl)
         {
             Rectangle winRect = NativeWin32.GetWindowRectangle(hwnd);
-            if (winRect.IsEmpty) return ComposerDockSnapshot.Empty;
             float scale = NativeWin32.GetWindowDpiScale(hwnd);
-
-            AutomationElement root = null;
-            try { root = AutomationElement.FromHandle(hwnd); } catch { }
-            if (root == null) return ComposerDockSnapshot.Empty;
+            var unavailable = new ComposerDockSnapshot
+            {
+                WindowHandle = hwnd, WindowRect = winRect, DpiScale = scale, Detail = "uia-unavailable"
+            };
+            if (winRect.IsEmpty) return unavailable;
 
             TreeWalker walker = TreeWalker.ControlViewWalker;
-            Rectangle dummy;
-            if (composer != null && !TryReadRect(composer, out dummy))
-                composer = null;
-
-            if (composer == null)
-                composer = FindComposer(root, walker);
-
-            Rectangle composerRect;
+            Rectangle composerRect = Rectangle.Empty;
             if (composer == null || !TryReadRect(composer, out composerRect))
+            {
+                AutomationElement root = null;
+                try { root = AutomationElement.FromHandle(hwnd); }
+                catch (ElementNotAvailableException) { }
+                catch (COMException) { }
+                catch (ArgumentException) { }
+                composer = root == null ? null : FindComposer(root, walker);
+                if (composer != null) TryReadRect(composer, out composerRect);
+            }
+
+            if (composerRect.IsEmpty)
             {
                 composer = null;
                 contextEl = null;
@@ -516,28 +673,7 @@ namespace CodexInputUsage
                 };
             }
 
-            var children = new List<ChildInfo>(16);
-            AutomationElement ch = TryFirstChild(walker, composer);
-            int idx = 0;
-            while (ch != null && idx < 64)
-            {
-                Rectangle r;
-                string ct, name, cls;
-                if (TryReadRect(ch, out r) && TryReadProps(ch, out ct, out name, out cls))
-                {
-                    children.Add(new ChildInfo
-                    {
-                        Element = ch,
-                        Index = idx,
-                        Rect = r,
-                        ControlType = ct,
-                        Name = name,
-                        ClassName = cls
-                    });
-                }
-                ch = TryNextSibling(walker, ch);
-                idx++;
-            }
+            var children = ReadComposerChildren(composer, walker);
 
             // 1. Find Context usage indicator (Image child of composer)
             int contextIndex = -1;
@@ -567,7 +703,7 @@ namespace CodexInputUsage
             {
                 AutomationElement btn;
                 Rectangle btnRect;
-                if (!TryExpandableButton(children[i].Element, walker, out btn, out btnRect)) continue;
+                if (!TryExpandableButton(children[i], walker, out btn, out btnRect)) continue;
                 if (!contextRect.IsEmpty && btnRect.Left < contextRect.Left) continue;
                 // When context indicator wasn't found, model selector sits in the right half of the composer
                 if (contextRect.IsEmpty && btnRect.Left < composerRect.Left + (composerRect.Width / 3)) continue;
@@ -596,7 +732,7 @@ namespace CodexInputUsage
             for (int i = 0; i < children.Count; i++)
             {
                 var c = children[i];
-                if (contextIndex >= 0 && c.Index >= contextIndex) continue;
+                if (contextIndex >= 0 && i >= contextIndex) continue;
                 if (c.Rect.IsEmpty || c.Rect.Height <= 1) continue;
                 if (c.ControlType != "Button" && c.ControlType != "Image") continue;
                 bool overlapsRow = c.Rect.Bottom > rowTop && c.Rect.Top < rowBottom;
@@ -643,9 +779,11 @@ namespace CodexInputUsage
             Rectangle winRect,
             Rectangle composerRect,
             float scale,
+            List<Tuple<AutomationElement, string>> titleElements,
             out string[] headerTexts,
             out string[] bodyTexts)
         {
+            titleElements.Clear();
             headerTexts = new string[0];
             bodyTexts = new string[0];
             if (hwnd == IntPtr.Zero || winRect.IsEmpty || composerRect.IsEmpty) return;
@@ -680,7 +818,7 @@ namespace CodexInputUsage
                 int bodyMinY = winRect.Top + OverlayDpi.Pixels(70, scale);
                 int bodyMaxY = composerRect.Top - OverlayDpi.Pixels(6, scale);
 
-                var headers = new List<Tuple<int, string>>();
+                var headers = new List<Tuple<int, string, AutomationElement, string>>();
                 var bodies = new List<Tuple<int, string>>();
 
                 using (cache.Activate())
@@ -708,7 +846,7 @@ namespace CodexInputUsage
                             {
                                 string trimmed = name.Trim();
                                 if (trimmed.Length >= 3)
-                                    headers.Add(Tuple.Create(left, trimmed));
+                                    headers.Add(Tuple.Create(left, trimmed, found[i], name));
                             }
                             else if ((ct == ControlType.Text || ct == ControlType.Header)
                                 && top >= bodyMinY && bottom <= bodyMaxY && left >= bodyMinX && right <= bodyMaxX)
@@ -722,12 +860,18 @@ namespace CodexInputUsage
                     }
                 }
 
-                headers.Sort(delegate(Tuple<int, string> a, Tuple<int, string> b) { return a.Item1.CompareTo(b.Item1); });
+                headers.Sort((a, b) => a.Item1.CompareTo(b.Item1));
                 var uniqHeaders = new List<string>();
                 var seenH = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 for (int i = 0; i < headers.Count && uniqHeaders.Count < 16; i++)
                 {
-                    if (seenH.Add(headers[i].Item2)) uniqHeaders.Add(headers[i].Item2);
+                    if (seenH.Add(headers[i].Item2))
+                    {
+                        uniqHeaders.Add(headers[i].Item2);
+                        // The first few header candidates suffice for inexpensive change detection.
+                        if (titleElements.Count < 3)
+                            titleElements.Add(Tuple.Create(headers[i].Item3, headers[i].Item4));
+                    }
                 }
 
                 // Bottom-most visible messages right above the composer come first
@@ -773,19 +917,10 @@ namespace CodexInputUsage
             // Fallback: locate the bottom-most Edit control inside the window
             try
             {
-                var editCond = new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit);
-                var edits = root.FindAll(TreeScope.Descendants, editCond);
+                var editWalker = new TreeWalker(new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit));
                 AutomationElement bestEdit = null;
                 int bestBottom = int.MinValue;
-                for (int i = 0; i < edits.Count; i++)
-                {
-                    Rectangle r;
-                    if (TryReadRect(edits[i], out r) && r.Width >= 240 && r.Bottom > bestBottom)
-                    {
-                        bestBottom = r.Bottom;
-                        bestEdit = edits[i];
-                    }
-                }
+                FindBottomEdit(root, editWalker, ref bestEdit, ref bestBottom);
                 if (bestEdit != null) return TryParent(walker, bestEdit);
             }
             catch { }
@@ -793,8 +928,115 @@ namespace CodexInputUsage
             return null;
         }
 
-        private static bool TryExpandableButton(AutomationElement el, TreeWalker walker, out AutomationElement btn, out Rectangle rect)
+        private static void FindBottomEdit(AutomationElement parent, TreeWalker walker,
+            ref AutomationElement bestEdit, ref int bestBottom)
         {
+            for (var edit = TryFirstChild(walker, parent); edit != null; edit = TryNextSibling(walker, edit))
+            {
+                Rectangle rect;
+                if (TryReadRect(edit, out rect) && rect.Width >= 240 && rect.Bottom > bestBottom)
+                {
+                    bestEdit = edit;
+                    bestBottom = rect.Bottom;
+                }
+                FindBottomEdit(edit, walker, ref bestEdit, ref bestBottom);
+            }
+        }
+
+        private static List<ChildInfo> ReadComposerChildren(AutomationElement composer, TreeWalker walker)
+        {
+            var children = new List<ChildInfo>(16);
+            var cache = new CacheRequest { TreeScope = TreeScope.Element | TreeScope.Children };
+            cache.Add(AutomationElement.BoundingRectangleProperty);
+            cache.Add(AutomationElement.ControlTypeProperty);
+            cache.Add(AutomationElement.NameProperty);
+            cache.Add(AutomationElement.ClassNameProperty);
+            cache.Add(AutomationElement.IsExpandCollapsePatternAvailableProperty);
+
+            try
+            {
+                using (cache.Activate())
+                {
+                    var found = composer.FindAll(TreeScope.Children, Automation.ControlViewCondition);
+                    for (int i = 0; i < found.Count && i < 64; i++)
+                        AddComposerChild(children, found[i], true);
+                }
+                return children;
+            }
+            catch (ElementNotAvailableException) { }
+            catch (COMException) { }
+            catch (InvalidOperationException) { }
+
+            children.Clear();
+            var child = TryFirstChild(walker, composer);
+            for (int i = 0; child != null && i < 64; i++)
+            {
+                AddComposerChild(children, child, false);
+                child = TryNextSibling(walker, child);
+            }
+            return children;
+        }
+
+        private static void AddComposerChild(List<ChildInfo> children, AutomationElement element, bool cached)
+        {
+            if (cached)
+            {
+                try
+                {
+                    var info = element.Cached;
+                    Rectangle rect;
+                    if (ConvertRect(info.BoundingRectangle, out rect))
+                    {
+                        children.Add(new ChildInfo
+                        {
+                            Element = element,
+                            Rect = rect,
+                            ControlType = ControlTypeName(info.ControlType),
+                            Name = info.Name ?? string.Empty,
+                            ClassName = info.ClassName ?? string.Empty,
+                            HasCache = true
+                        });
+                    }
+                    return;
+                }
+                catch (ElementNotAvailableException) { }
+                catch (InvalidOperationException) { }
+                catch (COMException) { }
+            }
+            Rectangle liveRect;
+            string type, name, cls;
+            if (TryReadRect(element, out liveRect) && TryReadProps(element, out type, out name, out cls))
+                children.Add(new ChildInfo { Element = element, Rect = liveRect, ControlType = type, Name = name, ClassName = cls });
+        }
+
+        private static bool TryExpandableButton(ChildInfo info, TreeWalker walker, out AutomationElement btn, out Rectangle rect)
+        {
+            AutomationElement el = info.Element;
+            if (info.HasCache)
+            {
+                try
+                {
+                    if (TryCachedExpandableButton(el, out rect))
+                    {
+                        btn = el;
+                        return true;
+                    }
+                    var children = el.CachedChildren;
+                    for (int i = 0; i < children.Count && i < 8; i++)
+                    {
+                        if (!TryCachedExpandableButton(children[i], out rect)) continue;
+                        btn = children[i];
+                        return true;
+                    }
+                    btn = null;
+                    rect = Rectangle.Empty;
+                    return false;
+                }
+                catch (ElementNotAvailableException) { }
+                catch (InvalidOperationException) { }
+                catch (COMException) { }
+            }
+
             btn = el;
             rect = Rectangle.Empty;
             string ct, name, cls;
@@ -814,6 +1056,14 @@ namespace CodexInputUsage
                 guard++;
             }
             return false;
+        }
+
+        private static bool TryCachedExpandableButton(AutomationElement el, out Rectangle rect)
+        {
+            rect = Rectangle.Empty;
+            return el.Cached.ControlType == ControlType.Button
+                && object.Equals(el.GetCachedPropertyValue(AutomationElement.IsExpandCollapsePatternAvailableProperty), true)
+                && ConvertRect(el.Cached.BoundingRectangle, out rect);
         }
 
         private static bool IsExpandable(AutomationElement el)
@@ -849,7 +1099,7 @@ namespace CodexInputUsage
             try
             {
                 var cur = e.Current;
-                controlType = cur.ControlType.ProgrammaticName.Replace("ControlType.", string.Empty);
+                controlType = ControlTypeName(cur.ControlType);
                 name = cur.Name ?? string.Empty;
                 className = cur.ClassName ?? string.Empty;
                 return true;
@@ -862,18 +1112,26 @@ namespace CodexInputUsage
             rect = Rectangle.Empty;
             try
             {
-                var b = e.Current.BoundingRectangle;
-                if (b.IsEmpty || double.IsNaN(b.X) || double.IsInfinity(b.X) || b.Width <= 0 || b.Height <= 0)
-                    return false;
-                if (b.X < -10000 || b.Y < -10000) return false;
-                rect = new Rectangle(
-                    (int)Math.Round(b.X),
-                    (int)Math.Round(b.Y),
-                    (int)Math.Round(b.Width),
-                    (int)Math.Round(b.Height));
-                return !rect.IsEmpty;
+                return ConvertRect(e.Current.BoundingRectangle, out rect);
             }
             catch { return false; }
+        }
+
+        private static string ControlTypeName(ControlType type)
+        {
+            return type == null ? string.Empty : type.ProgrammaticName.Replace("ControlType.", string.Empty);
+        }
+
+        private static bool ConvertRect(System.Windows.Rect bounds, out Rectangle rect)
+        {
+            rect = Rectangle.Empty;
+            if (bounds.IsEmpty || double.IsNaN(bounds.X) || double.IsInfinity(bounds.X) || bounds.Width <= 0 || bounds.Height <= 0)
+                return false;
+            if (bounds.X < -10000 || bounds.Y < -10000) return false;
+            rect = new Rectangle(
+                (int)Math.Round(bounds.X), (int)Math.Round(bounds.Y),
+                (int)Math.Round(bounds.Width), (int)Math.Round(bounds.Height));
+            return !rect.IsEmpty;
         }
     }
 }
