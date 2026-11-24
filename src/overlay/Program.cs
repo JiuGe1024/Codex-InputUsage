@@ -1151,9 +1151,10 @@ namespace CodexInputUsage
                 }
 
                 var dock = _dockTracker.Latest;
-                if (dock == null || dock.WindowHandle != fgCodex || dock.Source == DockSourceKind.None)
+                if (dock.WindowHandle != fgCodex || dock.Source == DockSourceKind.None)
                 {
-                    LogState("dock-pending:" + (dock != null ? dock.Detail : "null"));
+                    LogState(string.Format("dock-pending:{0} hwnd=0x{1:X}", dock.Detail, fgCodex.ToInt64()),
+                        string.Format(" geometryMs={0}", dock.GeometryMs));
                     _strip.HideStrip();
                     if (_popover.Visible) _popover.Hide();
                     return;

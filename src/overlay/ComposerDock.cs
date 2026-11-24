@@ -654,12 +654,19 @@ namespace CodexInputUsage
                 catch (ElementNotAvailableException) { }
                 catch (COMException) { }
                 catch (ArgumentException) { }
-                composer = root == null ? null : FindComposer(root, walker);
+                if (root == null)
+                {
+                    composer = contextEl = modelEl = null;
+                    unavailable.Detail = "uia-root-unavailable";
+                    return unavailable;
+                }
+                composer = FindComposer(root, walker);
                 if (composer != null) TryReadRect(composer, out composerRect);
             }
 
             if (composerRect.IsEmpty)
             {
+                string composerDetail = composer == null ? "uia-editor-not-found" : "uia-composer-no-bounds";
                 composer = null;
                 contextEl = null;
                 modelEl = null;
@@ -669,7 +676,7 @@ namespace CodexInputUsage
                     DpiScale = scale,
                     Source = DockSourceKind.None,
                     WindowRect = winRect,
-                    Detail = "no-prosemirror-composer"
+                    Detail = composerDetail
                 };
             }
 
@@ -917,30 +924,26 @@ namespace CodexInputUsage
             // Fallback: locate the bottom-most Edit control inside the window
             try
             {
-                var editWalker = new TreeWalker(new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit));
+                var editCondition = new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit);
+                var edits = root.FindAll(TreeScope.Descendants, editCondition);
                 AutomationElement bestEdit = null;
                 int bestBottom = int.MinValue;
-                FindBottomEdit(root, editWalker, ref bestEdit, ref bestBottom);
+                for (int i = 0; i < edits.Count; i++)
+                {
+                    Rectangle rect;
+                    if (TryReadRect(edits[i], out rect) && rect.Width >= 240 && rect.Bottom > bestBottom)
+                    {
+                        bestEdit = edits[i];
+                        bestBottom = rect.Bottom;
+                    }
+                }
                 if (bestEdit != null) return TryParent(walker, bestEdit);
             }
-            catch { }
+            catch (ElementNotAvailableException) { }
+            catch (COMException) { }
+            catch (InvalidOperationException) { }
 
             return null;
-        }
-
-        private static void FindBottomEdit(AutomationElement parent, TreeWalker walker,
-            ref AutomationElement bestEdit, ref int bestBottom)
-        {
-            for (var edit = TryFirstChild(walker, parent); edit != null; edit = TryNextSibling(walker, edit))
-            {
-                Rectangle rect;
-                if (TryReadRect(edit, out rect) && rect.Width >= 240 && rect.Bottom > bestBottom)
-                {
-                    bestEdit = edit;
-                    bestBottom = rect.Bottom;
-                }
-                FindBottomEdit(edit, walker, ref bestEdit, ref bestBottom);
-            }
         }
 
         private static List<ChildInfo> ReadComposerChildren(AutomationElement composer, TreeWalker walker)
