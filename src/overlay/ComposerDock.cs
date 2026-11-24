@@ -473,6 +473,7 @@ namespace CodexInputUsage
             var clock = Stopwatch.StartNew();
             long lastDiscoveryMs = -12000;
             long? degradedSinceMs = null;
+            string lastProviderError = null;
             var token = _cts.Token;
 
             while (!token.IsCancellationRequested)
@@ -548,7 +549,24 @@ namespace CodexInputUsage
                 if (needDiscovery)
                 {
                     elapsed.Restart();
-                    var next = Discover(hwnd, ref composer, ref contextEl, ref modelEl);
+                    ComposerDockSnapshot next;
+                    try
+                    {
+                        next = Discover(hwnd, ref composer, ref contextEl, ref modelEl);
+                        lastProviderError = null;
+                    }
+                    catch (Exception ex)
+                    {
+                        if (!IsRecoverableUiaError(ex)) throw;
+                        composer = contextEl = modelEl = null;
+                        string error = ex.GetType().Name;
+                        if (lastProviderError != error)
+                            Program.LogDiag(string.Format("geometry-uia-retry hwnd=0x{0:X} error={1}", hwnd.ToInt64(), ex));
+                        lastProviderError = error;
+                        _wakeSignal.WaitOne(220);
+                        continue;
+                    }
+
                     next.GeometryMs = elapsed.ElapsedMilliseconds;
                     lastDiscoveryMs = clock.ElapsedMilliseconds;
                     if (HoldPreviousAnchor(_latest, next, lastDiscoveryMs, ref degradedSinceMs))
@@ -625,10 +643,20 @@ namespace CodexInputUsage
                     if (!string.Equals(title.Item1.Current.Name, title.Item2, StringComparison.Ordinal))
                         return true;
                 }
-                catch (ElementNotAvailableException) { return true; }
-                catch (COMException) { return true; }
+                catch (Exception ex)
+                {
+                    if (!IsRecoverableUiaError(ex)) throw;
+                    return true;
+                }
             }
             return false;
+        }
+
+        private static bool IsRecoverableUiaError(Exception ex)
+        {
+            // A disappearing Electron accessibility node can invalidate a live or cached read.
+            return ex is ElementNotAvailableException || ex is COMException
+                || ex is InvalidOperationException || ex is TimeoutException;
         }
 
         private static ComposerDockSnapshot Discover(

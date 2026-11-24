@@ -158,6 +158,11 @@ namespace CodexInputUsage
 
                 ResetDiagFiles();
                 LogStartup(exitWithCodex);
+                AppDomain.CurrentDomain.UnhandledException += delegate(object sender, UnhandledExceptionEventArgs e)
+                {
+                    LogDiag(string.Format("unhandled thread={0} terminating={1} {2}",
+                        Thread.CurrentThread.Name ?? "unnamed", e.IsTerminating, e.ExceptionObject));
+                };
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
                 using (var app = new OverlayController(exitWithCodex))
