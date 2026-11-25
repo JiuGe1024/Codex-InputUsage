@@ -29,7 +29,15 @@
 
 ## 快速开始
 
-### 1. 构建
+### 下载 Release 直接运行
+
+1. 在 [GitHub Releases](https://github.com/JiuGe1024/Codex-InputUsage/releases/latest) 的 Assets 中下载 Windows x64 版 `Codex-InputUsage-Overlay.exe`。
+2. 打开通过 Microsoft Store 安装的原生 Codex Desktop，双击下载的 EXE。切回 Codex 窗口，浮层会停靠在输入框工具栏。
+3. 需要关闭时，在 Windows 系统托盘中右击 Codex InputUsage，选择「退出 Codex InputUsage」。
+
+手动运行只需要 EXE。若要随 Codex 自动启动，请下载或克隆完整仓库，把 Release 的 EXE 放进仓库内的 `outputs/`，再进入下文的「注册随原生 Codex 自动启动」。自动启动需要 Node.js 和仓库内的 `scripts/`。
+
+### 从源码构建
 
 仅需 Windows 自带的 .NET Framework 4.x `csc.exe`，无需额外 SDK 或 NuGet 依赖：
 
@@ -39,7 +47,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/Build-OverlayPro
 
 产物输出至 `outputs/Codex-InputUsage-Overlay.exe`。
 
-### 2. 注册随原生 Codex 自动启动
+### 注册随原生 Codex 自动启动
 
 需要本机已安装 Node.js（用于运行无工具 MCP 伴随脚本）：
 
@@ -55,7 +63,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/Uninstall-AutoSt
 
 也可直接在常驻条或系统托盘右键菜单中切换“跟随原生 Codex 自动启动”。
 
-### 3. 离线自检与离屏预览
+### 离线自检与离屏预览
 
 ```powershell
 .\outputs\Codex-InputUsage-Overlay.exe --self-test
