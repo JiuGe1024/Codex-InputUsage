@@ -75,7 +75,6 @@ scripts/
 docs/images/                  # 自述文件展示用高清界面预览图
 outputs/                      # 构建产物（Git 忽略）
 work/                         # 诊断日志、自检报告与离屏预览图（Git 忽略）
-legacy/cdp/                   # 早期 CDP 路线历史原型归档（仅作参考，不再维护）
 ```
 
 ## 项目文档
