@@ -2,6 +2,20 @@
 
 面向 Windows 原生 Microsoft Store 版 Codex Desktop 的轻量伴随用量监控浮层（**无 CDP、零外部依赖、单个约 245 KB 可执行文件**）。直接从原生图标启动 Codex，浮层自动随行停靠在输入框工具栏，提供实时速度、Token、缓存命中率、额度余量、十通道上下文拆分、调用明细与总汇总，以及多时段用量统计。
 
+## 界面预览
+
+### 常驻状态条（明 / 暗主题与可选配额槽位）
+
+| 浅色主题 · 默认槽位 | 深色主题 · 开启 5h 配额微胶囊 |
+| :---: | :---: |
+| ![浅色常驻状态条](docs/images/strip-light.png) | ![深色常驻状态条](docs/images/strip-dark.png) |
+
+### 三页签监控卡片（150% DPI 渲染，点击查看大图）
+
+| 当前会话 · 实时指标与十通道上下文 | 调用明细 · 会话走势与趋势拟合 | 用量统计 · 深色主题与分项悬停卡片 |
+| :---: | :---: | :---: |
+| ![当前会话监控卡片](docs/images/popover-session-light.png) | ![调用明细总汇总](docs/images/popover-turns-summary-light.png) | ![用量统计深色主题与悬停卡片](docs/images/popover-usage-hover-dark.png) |
+
 ## 核心特性
 
 - **输入框工具栏无缝停靠与低延迟跟随**：通过 Windows UI Automation 定位 Codex 输入框底栏（Context 圆环左侧），以 `UpdateLayeredWindow` 32 位预乘 Alpha 透明层渲染，自动跟随 `~/.codex/config.toml` 明暗主题并按宿主窗口 DPI 缩放；通过进程外 Win32 `SetWinEventHook` 实现切窗 `<1ms` 隐藏/恢复与窗口拖动 60 FPS 零重绘跟随，后台采用几何定位与会话指纹双 MTA 线程解耦、UIA `CacheRequest` 批量预读、50ms 纯坐标直更快路径、350ms 连续降级防抖及切回异尺寸暂隐防闪跳。
@@ -58,6 +72,7 @@ scripts/
   Install-AutoStart.ps1       # 注册 ~/.codex/config.toml 无工具 MCP 伴随入口
   Uninstall-AutoStart.ps1     # 移除伴随入口
   codex-mcp-companion.mjs     # 无工具 stdio MCP 伴随拉起脚本
+docs/images/                  # 自述文件展示用高清界面预览图
 outputs/                      # 构建产物（Git 忽略）
 work/                         # 诊断日志、自检报告与离屏预览图（Git 忽略）
 legacy/cdp/                   # 早期 CDP 路线历史原型归档（仅作参考，不再维护）
