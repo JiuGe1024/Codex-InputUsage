@@ -1,10 +1,10 @@
 # Codex InputUsage 当前状态
 
-更新于 2026-11-23。独立仓库目录：`Codex-InputUsage`（与父目录原版 TokenBar 分开维护）。
+更新于 2026-11-25。独立仓库维护（面向 Windows 原生 Microsoft Store 版 Codex Desktop 的无 CDP 伴随浮层）。
 
 ## 核心架构（无 CDP 路线）
 
-产物 `outputs/Codex-InputUsage-Overlay.exe`（.NET Framework 4.x `csc.exe` 零外部依赖构建）随 Windows 原生 Microsoft Store 版 Codex Desktop 伴随运行，源码全部位于 `src/overlay/`：
+产物 `outputs/Codex-InputUsage-Overlay.exe`（.NET Framework 4.x `csc.exe` 零外部依赖构建，约 245 KB）随 Windows 原生 Microsoft Store 版 Codex Desktop 伴随运行，源码全部位于 `src/overlay/`（19 个模块）：
 
 | 模块 | 职责 |
 |---|---|
@@ -14,15 +14,19 @@
 | `src/overlay/AccountQuotaReader.cs` | 扫描本机最近写入的 Codex rollout 尾部，提取账号级实时 `rate_limits`（5h / 周额度 + `resets_at` + `credits`），确保查看旧对话时也显示此刻实时余额与重置倒计时 |
 | `src/overlay/HistoryStatsReader.cs` | 后台读取 `state_5.sqlite` 真实会话和可用 rollout。rollout 按文件长度与 UTC 写入时间缓存，按响应 ID 去重并用响应时间归桶。缺少明细的会话按 SQLite 活跃时间和总量回退，计入覆盖统计 |
 | `src/overlay/OverlaySettings.cs` | 持久化常驻条显示项偏好至 `%LOCALAPPDATA%\CodexInputUsage\settings.json`（含至少保留 1 项的防空保护） |
-| `src/overlay/RolloutMetrics.cs` | 增量字节偏移解析 rollout JSONL：解析 `turn_context`（每轮模型/推理档位）与去重统计每轮上下文输入、思考/正文输出、会话累计 Token、缓存命中率、会话加权均速（Avg TPS）；TPS 分母采用 `整轮耗时 - (工具区间并集 - 与模型重叠)`；解析 `world_state`/`response_item`/`additional_tools`/`compacted` 生成十通道上下文拆分并按 Hamilton 最大余数法等比缩放至官方 `ContextUsedTokens` |
-| `src/overlay/ComposerDock.cs` | 独立 MTA 线程通过 UIA 定位 `ProseMirror -> composer -> Context 圆环 / 模型选择器 / 左侧按钮簇`，支持单次快速重读、`AutoResetEvent` 即时唤醒与切窗锚点缓存 |
+| `src/overlay/OverlayDpi.cs` | 封装宿主窗口 DPI 缩放与 96 DIP 逻辑坐标 / 物理像素互转工具 |
+| `src/overlay/RolloutMetrics.cs` | 增量字节偏移解析 rollout JSONL：解析 `turn_context`（每轮模型/推理档位）与去重统计每轮上下文输入、思考/正文输出、会话累计 Token、缓存命中率、会话加权均速（Avg TPS）、模型短名归一化与额度重置归一；TPS 分母采用 `整轮耗时 - (工具区间并集 - 与模型重叠)`；解析 `world_state`/`response_item`/`additional_tools`/`compacted` 生成十通道上下文拆分并按 Hamilton 最大余数法等比缩放至官方 `ContextUsedTokens` |
+| `src/overlay/ComposerDock.cs` | 几何定位（`ComposerDock`）与会话指纹（`ChatFingerprints`）双独立 MTA 线程解耦：几何通道使用 `CacheRequest` 批量预读子节点与一级子节点（异常安全回退）、50ms 纯坐标直更快路径、连续降级 350ms 防抖（30ms 复测）、`ProseMirror` 失败时批量 `Edit` 备用查询及可恢复 UIA 异常重试；指纹通道按已绑定 800ms / 未绑定 300ms 扫描并带最多 3 节点轻量标题变更检测，回写前核验版本、句柄、尺寸与 DPI |
 | `src/overlay/HostWindowEvents.cs` | UI 线程进程外 Win32 `SetWinEventHook`：全局监听切窗/最小化（`<1ms` 隐藏与首帧恢复），按 Codex PID 精确监听 `EVENT_OBJECT_LOCATIONCHANGE` 驱动拖动/缩放快路径 |
 | `src/overlay/StripForm.cs` | `WS_EX_LAYERED` + `UpdateLayeredWindow` 32 位预乘 Alpha 透明渲染：Segoe UI Variable Text Semibold（带 Segoe UI 回退）、语义着色的 TPS 与矢量闪电、柔和主题蓝本轮/累计 Token 胶囊、语义缓存胶囊和可选 5h 额度胶囊。可见槽位以细竖线分隔，绘制与测量共用布局，支持右键配置与四档窄窗适配，纯平移走 `MoveFast`（`SWP_NOREDRAW` 零重绘） |
-| `src/overlay/DetailPopoverForm.cs` | 点击状态条在上方展开监控卡片（三页签共用 `540×608` 逻辑尺寸、`WS_EX_NOACTIVATE`）：顶部带矢量图标的「当前会话 / 调用明细 / 用量统计」三页签切换、标题栏模型徽标与「钉住」开关、点击外部/`Esc` 自动收起；会话页含 2×2 指标卡（输出速度与会话平均速度并列）、双列实时额度卡与十通道上下文卡；调用明细页固定子工具栏，可切换按轮表格与总汇总。总汇总显示会话走势、趋势拟合及四段 Token 占比模型卡，多模型时可单击卡片锁定拟合；用量统计支持今天、1天、7天、30天、全部与自定义，包含总览、平滑面积图、模型排行与所选时段 Top 5 会话 |
+| `src/overlay/DetailPopoverForm.cs` | 点击状态条在上方展开监控卡片（三页签共用 `540×608` 逻辑尺寸、12 DIP 外圆角、`WS_EX_NOACTIVATE`）：顶部带矢量图标的「当前会话 / 调用明细 / 用量统计」三页签切换、标题栏模型徽标与「钉住」开关、点击外部/`Esc` 自动收起；会话页含 2×2 指标卡（输出速度与会话平均速度并列）、双列实时额度卡与十通道上下文卡 |
+| `src/overlay/DetailPopoverTurns.cs` | 「调用明细」页签的「总汇总」视图绘制与交互：展示平滑会话走势、OLS/LOESS 趋势拟合与置信带、四段 Token 占比模型卡，多模型时支持单击卡片锁定/解除拟合 |
+| `src/overlay/DetailPopoverUsage.cs` | 「用量统计」页签绘制与交互：支持今天、1 天、7 天、30 天、全部与自定义 6 档切换及纯 GDI+ 日期步进/滚轮调节，包含 2×3 用量总览、平滑面积趋势图与分项悬停卡片、模型排行及所选时段 Top 5 会话 |
 | `src/overlay/OverlayCharts.cs` | 共用水平张力三次贝塞尔曲线、渐变面积和拟合置信带，控制点约束使曲线保持在相邻样本值之间 |
 | `src/overlay/SessionAnalytics.cs` | 按模型聚合轮次、四段 Token、加权 TPS、平均首字和缓存命中率。趋势样本较少时使用 OLS，较多时使用高斯核局部线性拟合 |
 | `src/overlay/CodexTheme.cs` | 读取 `~/.codex/config.toml` 的 `appearanceTheme`（回退系统主题），提供明暗双主题与十通道上下文色板 |
-| `src/overlay/Program.cs` | 协调所有子系统、单实例互斥锁、系统托盘、`FileSystemWatcher` rollout 实时监听、`--exit-with-codex` 自动退出与 `--self-test` 自检 |
+| `src/overlay/UsageStatsChecks.cs` | 用量统计日期预设、多源防重计归桶、平滑曲线与多 DPI 交互的离线自检逻辑 |
+| `src/overlay/Program.cs` | 协调所有子系统、单实例互斥锁、系统托盘、`FileSystemWatcher` rollout 实时监听、`SyncNow` 先落位后匹配与切回异尺寸/异 DPI 暂隐防护、`AppDomain.UnhandledException` 诊断日志、`--exit-with-codex` 自动退出与 `--self-test` 全量自检 |
 
 弹窗统一使用模型短名，例如 `6.2sol · 中`、`6Astra`。解析、会话匹配、历史聚合和诊断使用原始模型 ID。
 
@@ -40,8 +44,8 @@
 
 ## 关键约束与已知限制
 
-- 代理工具终端运行在隔离桌面 `exebox-...`，无法直接枚举真实交互桌面 `Default` 的窗口；编译、自检、IPC 抓包和离屏渲染可在终端完成，真实桌面停靠/拖动/点击验收需在用户交互桌面执行。
-- 早期 CDP 路线历史原型已归档至 `legacy/cdp/`（仅作口径参考，不再维护）；过时交接文档 `HANDOFF.md` 已清理。
+- 隔离桌面环境无法直接枚举真实交互桌面 `Default` 的窗口；编译、自检、IPC 抓包和离屏渲染可在命令行完成，真实桌面停靠/拖动/点击验收需在用户交互桌面执行。
+- 早期 CDP 路线历史原型已归档至 `legacy/cdp/`（仅作口径参考，不再维护）。
 
 ## 构建与常用命令
 

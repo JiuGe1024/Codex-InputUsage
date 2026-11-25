@@ -1,12 +1,12 @@
 # Codex InputUsage 验证记录
 
-更新于 2026-11-23。
+更新于 2026-11-25。
 
 ## 已实测通过
 
 ### 1. 构建与零警告检查
 - 命令：`powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/Build-OverlayPrototype.ps1`
-- 结果：退出码 0，0 错误 0 警告，产物 `outputs/Codex-InputUsage-Overlay.exe`（233,984 字节）。
+- 结果：退出码 0，0 错误 0 警告，最新产物 `outputs/Codex-InputUsage-Overlay.exe`（245,248 字节）。
 
 ### 2. 路由与零猜测会话匹配（`--self-test`）
 - 单测结果：`match_tests pool=True header=True bodyTieBreak=True refuseAmbig=True disconnectClear=True localHdr=True localSingle=True localRefuseAmbig=True`
@@ -82,6 +82,13 @@
 - 已目视核对明暗主题、1 天小时趋势、自定义筛选、滚动后的模型排行与 Top 5，以及 150% 用量统计和调用总汇总。150% 弹窗均为 810×912。预览位于 `work/preview-detail-history-*.png`、`work/preview-detail-usage-*.png`、`work/preview-dpi150-history.png` 及调用总汇总对应预览。
 - 仅替换并重启 InputUsage 浮层（PID 49480 → 39196）。诊断日志确认新版于 19:12:53 通过 UIA 停靠原生 Codex。筛选交互与高 DPI 仍由离屏测试覆盖。
 
+### 11. 用量趋势悬停卡片与浮层定位响应优化（`4363cf2` / `6c92964` / `97b3598` / `0c31cc8`）
+
+- 正式构建与默认产物 `.\outputs\Codex-InputUsage-Overlay.exe --self-test` 均返回退出码 0，编译器 0 错误、0 警告。
+- `work/selftest-report.txt` 全部 9 组自检断言全为 `True`：既有 8 组（`match_tests`、`quota_reset_tests`、`settings_test`、`strip_style_tests`、`model_name_tests`、`turns_summary_tests`、`usage_stats_tests`、`dpi_tests`）零回归；新增 `dock_perf_tests holdsTransient=True expires=True resets=True bypasses=True waitsForResize=True translates=True keepsFingerprints=True clearsFingerprints=True`，覆盖连续降级 350ms 防抖与重置、尺寸/句柄/DPI 变化旁路、异尺寸等待与纯平移偏移、同窗指纹保留与跨窗清空。
+- 实机 `Default` 桌面运行日志（`work/overlay-diag.log`）与停靠截图（`work/overlay-diag-capture.png`）核实：新版准确停靠于 Context 圆环左侧并完成本地标题匹配；首次发现到 `anchor-applied` 由基线 `1.59s` 降至 `0.79s`（`geometryMs=161ms`），后续切回热路径 `geometryMs` 低至 `9ms–46ms`，连续多次切窗往返无崩溃、`dock-pending` 卡死或 `UiaComposer` 上跳。
+
 ## 未在本终端执行的验证边界
 
-- 真实高 DPI 显示器上的停靠、异 DPI 双屏拖移与弹窗实机点击尚未复测。本轮的高 DPI 数据来自离屏渲染与模拟输入。
+- 真实 125% / 150% / 200% 高 DPI 显示器上的停靠、异 DPI 双屏拖移与弹窗实机点击尚未复测（高 DPI 数据来自离屏渲染与模拟输入）。
+- 同一 Codex 窗口内连续切换多条对话与切回已改尺寸窗口的实机日志轨迹保留为日常使用持续观察项（相关状态机逻辑已由 `dock_perf_tests` 与代码审查覆盖）。
