@@ -287,8 +287,8 @@ namespace CodexInputUsage
                 snap.ContextUsedTokens, snap.ContextWindowTokens,
                 snap.ContextCachedTokens, snap.ContextUncachedInputTokens, snap.ContextRemainingTokens,
                 snap.Turns.Count));
-            sb.AppendLine(string.Format("quota live={0} 5hUsed={1} ({2}) weekUsed={3} ({4}) src={5}",
-                snap.QuotaIsAccountLive,
+            sb.AppendLine(string.Format("quota timestampKnown={0} 5hUsed={1} ({2}) weekUsed={3} ({4}) src={5}",
+                snap.QuotaObservedAtUtc.HasValue,
                 snap.PrimaryUsedPct, MetricFormatter.FormatResetCountdown(snap.PrimaryResetsAt, false),
                 snap.SecondaryUsedPct, MetricFormatter.FormatResetCountdown(snap.SecondaryResetsAt, true),
                 liveQuota != null ? Path.GetFileName(liveQuota.SourcePath) : "(none)"));
@@ -450,8 +450,9 @@ namespace CodexInputUsage
             sb.AppendLine(string.Format("dpi_tests logicalHit={0} workArea={1}", dpiHit, dpiBounds));
             bool dockPerfOk = CheckDockPerformance(sb);
             bool privacyOk = PrivacySecurityChecks.Run(sb, workDir);
+            bool accuracyOk = MetricsAccuracyChecks.Run(sb, workDir);
             File.WriteAllText(Path.Combine(workDir, "selftest-report.txt"), sb.ToString(), Encoding.UTF8);
-            if (!quotaFuture || !quotaReset || !quotaMissing || !dpiHit || !dpiBounds || !stripStyleOk || !modelNameOk || !turnsSummaryOk || !usageStatsOk || !dockPerfOk || !privacyOk) Environment.ExitCode = 1;
+            if (!quotaFuture || !quotaReset || !quotaMissing || !dpiHit || !dpiBounds || !stripStyleOk || !modelNameOk || !turnsSummaryOk || !usageStatsOk || !dockPerfOk || !privacyOk || !accuracyOk) Environment.ExitCode = 1;
         }
 
         private static bool CheckDockPerformance(StringBuilder report)

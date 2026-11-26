@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -1096,7 +1096,7 @@ namespace CodexInputUsage
             DrawSingleQuotaCard(
                 g, new Rectangle(Pad, y + 2, cardW, cardH),
                 "5h 额度余量", snap.PrimaryUsedPct, snap.PrimaryResetsAt, false, utcNow,
-                snap.QuotaIsAccountLive ? "实时" : null, pal, labelFont, subFont, monoBoldFont);
+                snap.PrimaryUsedPct.HasValue ? MetricFormatter.FormatSnapshotAge(snap.QuotaObservedAtUtc, utcNow) : null, pal, labelFont, subFont, monoBoldFont);
 
             string creditNote = (snap.HasCredits && !string.IsNullOrWhiteSpace(snap.CreditsBalance) && snap.CreditsBalance != "0")
                 ? ("余额 $" + snap.CreditsBalance)
@@ -1447,16 +1447,13 @@ namespace CodexInputUsage
                 g.DrawPath(ipen, ip);
             }
 
-            long toolMs = (inspected.WallDurationMs.HasValue && inspected.WallDurationMs.Value > inspected.ModelActiveMs)
-                ? (inspected.WallDurationMs.Value - inspected.ModelActiveMs)
-                : 0;
             string detailLine = string.Format("#{0} 精确  总 {1} · 命中 {2} · 推理 {3} · 总耗时 {4} (工具 {5})",
                 inspected.Index,
                 MetricFormatter.ExactTokens(inspected.TotalTokens),
                 MetricFormatter.ExactTokens(inspected.CachedInputTokens),
                 MetricFormatter.ExactTokens(inspected.ReasoningOutputTokens),
                 MetricFormatter.FormatSeconds(inspected.WallDurationMs),
-                MetricFormatter.FormatSeconds(toolMs));
+                MetricFormatter.FormatSeconds(inspected.ToolExclusiveMs));
             using (var db = new SolidBrush(pal.TextSecondary))
                 g.DrawString(detailLine, subFont, db, inspRect.X + 8, inspRect.Y + 5);
         }

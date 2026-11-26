@@ -8,9 +8,16 @@
 - 伴随菜单和两份安装脚本共用 `CodexCompanionConfig`。启用前检查脚本、Node.js 和 Codex 配置，配置采用同目录原子替换，缺少依赖时仍可卸载现有配置。
 - 会话正文缓存按 LRU 淘汰，上限为 32 条和 8 Mi 字符，进入待机时释放缓存。
 
+## 指标口径
+
+- 额度来自本地 rollout 的 `token_count.rate_limits`。账号快照只有在事件时间不早于当前会话快照时才覆盖。详情卡显示距观测时间的间隔，重置显示仍为 `100%` 与「已重置」。
+- 生成中 TPS 为已记录输出与暂估活跃时间的比值，无可用样本时保留上一完成轮的速度。单轮速度为输出 Token 除以活跃时间。可确定轮次边界时，活跃时间为总耗时扣除纯工具耗时，后者是裁剪到轮次的工具区间并集减去与模型区间的交集。会话速度以参与计算的输出量和活跃时间各自求和后相除。
+- 首字延迟取自 rollout 的 `time_to_first_token_ms`。本轮验证使用合成事件，未与真实 SSE 首字流对照。
+- 上下文总量取自 Codex 记录的输入量。十通道基于本地条目分类估算，有可用权重时按 Hamilton 最大余数法归一至官方总量。估算剔除推理密文与图片 Base64 编码体，保留摘要和自然语言文本。
+
 ## 核心架构（无 CDP 路线）
 
-产物 `outputs/Codex-InputUsage-Overlay.exe`（.NET Framework 4.x `csc.exe` 零外部依赖构建，约 252 KB）随 Windows 原生 Microsoft Store 版 Codex Desktop 伴随运行，源码全部位于 `src/overlay/`（21 个模块）：
+产物 `outputs/Codex-InputUsage-Overlay.exe`（.NET Framework 4.x `csc.exe` 零外部依赖构建，约 265 KB）随 Windows 原生 Microsoft Store 版 Codex Desktop 伴随运行，源码全部位于 `src/overlay/`（22 个模块）：
 
 | 模块 | 职责 |
 |---|---|

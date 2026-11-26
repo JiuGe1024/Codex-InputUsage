@@ -19,15 +19,13 @@ namespace CodexInputUsage
 
         private readonly JavaScriptSerializer _json = new JavaScriptSerializer { MaxJsonLength = 4 * 1024 * 1024 };
         private DateTime _lastCheckUtc = DateTime.MinValue;
-        private string _cachedPath = string.Empty;
-        private long _cachedLength = -1;
-        private DateTime _cachedWriteUtc = DateTime.MinValue;
+        private Tuple<string, long, DateTime>[] _checkedCandidates;
         private AccountQuotaSnapshot _cached;
 
         internal AccountQuotaSnapshot GetLatestQuota(bool force)
         {
             DateTime now = DateTime.UtcNow;
-            if (!force && _cached != null && (now - _lastCheckUtc).TotalSeconds < 4.0)
+            if (!force && (now - _lastCheckUtc).TotalSeconds < 4.0)
                 return _cached;
             _lastCheckUtc = now;
 
@@ -51,38 +49,38 @@ namespace CodexInputUsage
                 // token_count across all conversations is inspected first.
                 files.Sort(delegate(FileInfo a, FileInfo b) { return b.LastWriteTimeUtc.CompareTo(a.LastWriteTimeUtc); });
 
-                if (files.Count == 0) return _cached;
-
-                FileInfo top = files[0];
-                if (_cached != null
-                    && string.Equals(_cachedPath, top.FullName, StringComparison.OrdinalIgnoreCase)
-                    && _cachedLength == top.Length
-                    && _cachedWriteUtc == top.LastWriteTimeUtc)
-                {
-                    return _cached;
-                }
-
-                for (int i = 0; i < Math.Min(files.Count, 5); i++)
-                {
-                    var snap = TryReadLastRateLimits(files[i].FullName);
-                    if (snap != null)
-                    {
-                        _cached = snap;
-                        _cachedPath = files[i].FullName;
-                        _cachedLength = files[i].Length;
-                        _cachedWriteUtc = files[i].LastWriteTimeUtc;
-                        return _cached;
-                    }
-                }
+                var candidates = files.Take(5).Select(file =>
+                    Tuple.Create(file.FullName, file.Length, file.LastWriteTimeUtc)).ToArray();
+                return ReadCandidates(candidates, TryReadLastRateLimits);
             }
             catch { }
 
             return _cached;
         }
 
+        internal AccountQuotaSnapshot ReadCandidates(Tuple<string, long, DateTime>[] candidates,
+            Func<string, AccountQuotaSnapshot> read)
+        {
+            if (_checkedCandidates != null && _checkedCandidates.SequenceEqual(candidates)) return _cached;
+
+            foreach (var candidate in candidates)
+            {
+                var snapshot = read(candidate.Item1);
+                if (snapshot == null) continue;
+                if (_cached != null && _cached.ObservedAtUtc.HasValue
+                    && (!snapshot.ObservedAtUtc.HasValue || snapshot.ObservedAtUtc < _cached.ObservedAtUtc)) continue;
+                _cached = snapshot;
+                break;
+            }
+            _checkedCandidates = candidates;
+            return _cached;
+        }
+
         internal static void ApplyToSnapshot(SessionMetricsSnapshot snap, AccountQuotaSnapshot live)
         {
             if (snap == null || live == null) return;
+            if (snap.QuotaObservedAtUtc.HasValue &&
+                (!live.ObservedAtUtc.HasValue || live.ObservedAtUtc < snap.QuotaObservedAtUtc)) return;
             if (live.PrimaryUsedPct.HasValue)
             {
                 snap.PrimaryUsedPct = live.PrimaryUsedPct;
@@ -96,7 +94,7 @@ namespace CodexInputUsage
             snap.HasCredits = live.HasCredits;
             snap.UnlimitedCredits = live.UnlimitedCredits;
             snap.CreditsBalance = live.CreditsBalance;
-            snap.QuotaIsAccountLive = true;
+            snap.QuotaObservedAtUtc = live.ObservedAtUtc;
         }
 
         private AccountQuotaSnapshot TryReadLastRateLimits(string path)
@@ -139,7 +137,7 @@ namespace CodexInputUsage
 
             var payload = GetDict(row, "payload");
             var rl = GetDict(payload, "rate_limits");
-            if (rl == null) return null;
+            if (rl == null || GetStr(row, "type") != "event_msg" || GetStr(payload, "type") != "token_count") return null;
 
             var primary = GetDict(rl, "primary");
             var secondary = GetDict(rl, "secondary");
@@ -154,14 +152,7 @@ namespace CodexInputUsage
             bool unlimited = GetBool(credits, "unlimited");
             string balance = GetStr(credits, "balance");
 
-            DateTime obs = DateTime.UtcNow;
-            string ts = GetStr(row, "timestamp");
-            DateTime parsedTs;
-            if (!string.IsNullOrWhiteSpace(ts) && DateTime.TryParse(ts, CultureInfo.InvariantCulture,
-                DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out parsedTs))
-            {
-                obs = parsedTs;
-            }
+            DateTime? obs = MetricFormatter.ParseUtcTimestamp(GetStr(row, "timestamp"));
 
             return new AccountQuotaSnapshot
             {

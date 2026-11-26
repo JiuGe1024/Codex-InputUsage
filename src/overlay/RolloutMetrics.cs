@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -24,6 +24,7 @@ namespace CodexInputUsage
         internal long ReasoningOutputTokens;
         internal long TotalTokens;
         internal long ModelActiveMs;
+        internal long ToolExclusiveMs;
         internal long? TtftMs;
         internal long? WallDurationMs;
         internal double? Tps;
@@ -46,7 +47,7 @@ namespace CodexInputUsage
         internal bool HasCredits;
         internal bool UnlimitedCredits;
         internal string CreditsBalance;
-        internal DateTime ObservedAtUtc;
+        internal DateTime? ObservedAtUtc;
         internal string SourcePath;
     }
 
@@ -87,7 +88,7 @@ namespace CodexInputUsage
         internal bool HasCredits;
         internal bool UnlimitedCredits;
         internal string CreditsBalance;
-        internal bool QuotaIsAccountLive;
+        internal DateTime? QuotaObservedAtUtc;
 
         // Latest turn highlights
         internal double? DisplayTps;
@@ -205,6 +206,23 @@ namespace CodexInputUsage
 
         private static readonly DateTime UnixEpochUtc = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
+        internal static DateTime? ParseUtcTimestamp(string value)
+        {
+            DateTime parsed;
+            return DateTime.TryParse(value, CultureInfo.InvariantCulture,
+                DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out parsed) ? (DateTime?)parsed : null;
+        }
+
+        internal static string FormatSnapshotAge(DateTime? observedUtc, DateTime nowUtc)
+        {
+            if (!observedUtc.HasValue) return null;
+            TimeSpan age = nowUtc - observedUtc.Value;
+            if (age.TotalMinutes < 1) return "刚刚";
+            if (age.TotalHours < 1) return (int)age.TotalMinutes + "m前";
+            if (age.TotalDays < 1) return (int)age.TotalHours + "h前";
+            return (int)age.TotalDays + "d前";
+        }
+
         internal static bool IsQuotaWindowReset(long? resetsAtUnix, DateTime utcNow)
         {
             return resetsAtUnix > 0 && resetsAtUnix <= (utcNow - UnixEpochUtc).TotalSeconds;
@@ -296,7 +314,7 @@ namespace CodexInputUsage
 
     internal sealed class RolloutSessionTracker
     {
-        private const long MaxSingleItemMs = 600000L;
+        private const long MaxSingleItemMs = 7200000L;
         private const double MaxPlausibleTps = 100000.0;
 
         internal static double? ComputeAverageTps(long output, long activeMs)
@@ -326,6 +344,7 @@ namespace CodexInputUsage
             internal int Order;
             internal string TurnId;
             internal bool Complete;
+            internal bool Interrupted;
             internal string Model;
             internal string Effort;
             internal long? ContextInputTokens;
@@ -397,6 +416,7 @@ namespace CodexInputUsage
         private long? _primaryResetsAt;
         private double? _secondaryUsedPct;
         private long? _secondaryResetsAt;
+        private DateTime? _quotaObservedAtUtc;
 
         private double? _lastCompletedTps;
         private long? _lastCompletedModelMs;
@@ -438,6 +458,7 @@ namespace CodexInputUsage
             _primaryResetsAt = null;
             _secondaryUsedPct = null;
             _secondaryResetsAt = null;
+            _quotaObservedAtUtc = null;
             _lastCompletedTps = null;
             _lastCompletedModelMs = null;
             _lastCompletedTtftMs = null;
@@ -504,10 +525,7 @@ namespace CodexInputUsage
                                 if (lineBytes > 0)
                                 {
                                     string line = Encoding.UTF8.GetString(lineBuf.GetBuffer(), 0, (int)lineBytes).Trim();
-                                    if (line.Length > 0 && MightBeInteresting(line))
-                                    {
-                                        if (ConsumeLine(line)) changed = true;
-                                    }
+                                    if (line.Length > 0 && ConsumeInterestingLine(line)) changed = true;
                                 }
                                 lineBuf.SetLength(0);
                                 consumedOffset += (segLen + 1);
@@ -526,10 +544,7 @@ namespace CodexInputUsage
                         string tail = Encoding.UTF8.GetString(lineBuf.GetBuffer(), 0, (int)lineBuf.Length).Trim();
                         if (tail.Length > 2 && tail[0] == '{' && tail[tail.Length - 1] == '}')
                         {
-                            if (MightBeInteresting(tail))
-                            {
-                                if (ConsumeLine(tail)) changed = true;
-                            }
+                            if (ConsumeInterestingLine(tail)) changed = true;
                             consumedOffset += lineBuf.Length;
                         }
                     }
@@ -550,6 +565,10 @@ namespace CodexInputUsage
                 || line.IndexOf("\"token_count\"", StringComparison.Ordinal) >= 0
                 || line.IndexOf("\"task_started\"", StringComparison.Ordinal) >= 0
                 || line.IndexOf("\"task_complete\"", StringComparison.Ordinal) >= 0
+                || line.IndexOf("\"turn_aborted\"", StringComparison.Ordinal) >= 0
+                || line.IndexOf("\"task_aborted\"", StringComparison.Ordinal) >= 0
+                || line.IndexOf("\"task_cancelled\"", StringComparison.Ordinal) >= 0
+                || line.IndexOf("\"task_failed\"", StringComparison.Ordinal) >= 0
                 || line.IndexOf("\"item_completed\"", StringComparison.Ordinal) >= 0
                 || line.IndexOf("\"response_item\"", StringComparison.Ordinal) >= 0
                 || line.IndexOf("\"world_state\"", StringComparison.Ordinal) >= 0
@@ -558,14 +577,15 @@ namespace CodexInputUsage
                 || line.IndexOf("\"session_meta\"", StringComparison.Ordinal) >= 0;
         }
 
+        internal bool ConsumeInterestingLine(string line)
+        {
+            return MightBeInteresting(line) && ConsumeLine(line);
+        }
+
         private bool ConsumeLine(string line)
         {
             // Fast path for high-volume response_item lines (avoid JSON deserializing 100KB tool outputs!)
-            if (line.IndexOf("\"type\":\"response_item\"", StringComparison.Ordinal) >= 0
-                && line.IndexOf("\"additional_tools\"", StringComparison.Ordinal) < 0)
-            {
-                return ConsumeFastResponseItem(line);
-            }
+            if (TryConsumeFastResponseItem(line)) return true;
 
             Dictionary<string, object> row;
             try { row = _json.DeserializeObject(line) as Dictionary<string, object>; }
@@ -680,24 +700,27 @@ namespace CodexInputUsage
                     }
                 }
 
-                var rateLimits = GetDict(payload, "rate_limits");
-                if (rateLimits != null)
+                var quota = GetDict(payload, "rate_limits");
+                var primary = GetDict(quota, "primary");
+                var secondary = GetDict(quota, "secondary");
+                double? primaryUsed = GetDouble(primary, "used_percent");
+                double? secondaryUsed = GetDouble(secondary, "used_percent");
+                if (primaryUsed.HasValue || secondaryUsed.HasValue)
                 {
-                    var primary = GetDict(rateLimits, "primary");
-                    if (primary != null)
+                    DateTime? observed = MetricFormatter.ParseUtcTimestamp(GetStr(row, "timestamp"));
+                    if (!_quotaObservedAtUtc.HasValue || observed >= _quotaObservedAtUtc)
                     {
-                        double? used = GetDouble(primary, "used_percent");
-                        if (used.HasValue) _primaryUsedPct = used.Value;
-                        long? resets = GetLong(primary, "resets_at");
-                        if (resets.HasValue) _primaryResetsAt = resets.Value;
-                    }
-                    var secondary = GetDict(rateLimits, "secondary");
-                    if (secondary != null)
-                    {
-                        double? used = GetDouble(secondary, "used_percent");
-                        if (used.HasValue) _secondaryUsedPct = used.Value;
-                        long? resets = GetLong(secondary, "resets_at");
-                        if (resets.HasValue) _secondaryResetsAt = resets.Value;
+                        if (primaryUsed.HasValue)
+                        {
+                            _primaryUsedPct = primaryUsed;
+                            _primaryResetsAt = GetLong(primary, "resets_at");
+                        }
+                        if (secondaryUsed.HasValue)
+                        {
+                            _secondaryUsedPct = secondaryUsed;
+                            _secondaryResetsAt = GetLong(secondary, "resets_at");
+                        }
+                        _quotaObservedAtUtc = observed;
                     }
                 }
                 return true;
@@ -709,12 +732,27 @@ namespace CodexInputUsage
                 if (!string.IsNullOrWhiteSpace(turnId))
                 {
                     var turn = GetOrCreateTurn(turnId);
+                    if (turn.Complete || turn.Interrupted) return false;
+                    if (!string.Equals(_activeTurnId, turnId, StringComparison.OrdinalIgnoreCase))
+                        InterruptActiveTurn();
                     long? tsMs = ParseTimestampMs(GetStr(row, "timestamp"));
                     if (tsMs.HasValue && !turn.StartedAtMs.HasValue) turn.StartedAtMs = tsMs.Value;
                     _activeTurnId = turnId;
                     _isStreaming = true;
                 }
                 return true;
+            }
+
+            if (pType == "turn_aborted" || pType == "task_aborted" || pType == "task_cancelled" || pType == "task_failed")
+            {
+                string turnId = GetStr(payload, "turn_id") ?? GetStr(GetDict(payload, "turn_attribution"), "turn_id");
+                if (_isStreaming && (string.IsNullOrWhiteSpace(turnId)
+                    || string.Equals(_activeTurnId, turnId, StringComparison.OrdinalIgnoreCase)))
+                {
+                    InterruptActiveTurn();
+                    return true;
+                }
+                return false;
             }
 
             if (pType == "item_completed")
@@ -751,6 +789,7 @@ namespace CodexInputUsage
                 if (!string.IsNullOrWhiteSpace(turnId))
                 {
                     var turn = GetOrCreateTurn(turnId);
+                    if (turn.Interrupted || turn.Complete) return false;
                     turn.Complete = true;
                     long? dur = GetLong(payload, "duration_ms");
                     if (dur.HasValue && dur.Value >= 0) turn.WallDurationMs = dur.Value;
@@ -775,7 +814,10 @@ namespace CodexInputUsage
                     if (summary.TtftMs.HasValue) _lastCompletedTtftMs = summary.TtftMs;
 
                     if (string.Equals(_activeTurnId, turnId, StringComparison.OrdinalIgnoreCase))
+                    {
                         _isStreaming = false;
+                        _activeTurnId = null;
+                    }
                 }
                 return true;
             }
@@ -811,6 +853,7 @@ namespace CodexInputUsage
                 PrimaryResetsAt = _primaryResetsAt,
                 SecondaryUsedPct = _secondaryUsedPct,
                 SecondaryResetsAt = _secondaryResetsAt,
+                QuotaObservedAtUtc = _quotaObservedAtUtc,
                 ContextChannels = BuildContextChannels(_contextUsed)
             };
 
@@ -835,7 +878,8 @@ namespace CodexInputUsage
             if (snap.Turns.Count > 0)
                 snap.LatestTurn = snap.Turns[snap.Turns.Count - 1];
 
-            // Determine displayed TPS: live turn if measurable, else held last completed TPS
+            // Streaming TPS is provisional. Completed turns use output / tool-exclusive-adjusted wall time.
+            // Session TPS uses summed output / summed active time, not the mean of per-turn ratios.
             if (_isStreaming && !string.IsNullOrWhiteSpace(_activeTurnId) && _turnsById.ContainsKey(_activeTurnId))
             {
                 var live = BuildTurnSummary(_turnsById[_activeTurnId]);
@@ -854,7 +898,7 @@ namespace CodexInputUsage
                     snap.LatestTtftMs = _lastCompletedTtftMs;
                 }
             }
-            else if (snap.LatestTurn != null && snap.LatestTurn.Tps.HasValue)
+            else if (snap.LatestTurn != null && snap.LatestTurn.Complete && snap.LatestTurn.Tps.HasValue)
             {
                 snap.DisplayTps = snap.LatestTurn.Tps;
                 snap.TpsIsHeld = false;
@@ -884,6 +928,15 @@ namespace CodexInputUsage
             return t;
         }
 
+        private void InterruptActiveTurn()
+        {
+            MutableTurn turn;
+            if (_activeTurnId != null && _turnsById.TryGetValue(_activeTurnId, out turn))
+                turn.Interrupted = true;
+            _activeTurnId = null;
+            _isStreaming = false;
+        }
+
         private void ApplyCumulative(UsageBag u)
         {
             if (u == null) return;
@@ -906,7 +959,9 @@ namespace CodexInputUsage
                 reason += r.Reasoning;
             }
             long total = inp + outp;
-            long modelMs = ComputeDurationWithoutToolsMs(turn);
+            long? wallMs;
+            long toolMs;
+            long modelMs = ComputeDurationWithoutToolsMs(turn, out wallMs, out toolMs);
 
             double? tps = null;
             if (outp > 0 && modelMs >= 200)
@@ -932,7 +987,8 @@ namespace CodexInputUsage
                 TotalTokens = total,
                 ModelActiveMs = modelMs,
                 TtftMs = turn.TtftMs,
-                WallDurationMs = turn.WallDurationMs,
+                WallDurationMs = wallMs,
+                ToolExclusiveMs = toolMs,
                 Tps = tps,
                 CacheHitPct = inp > 0 ? (double?)(cached * 100.0 / inp) : null
             };
@@ -946,58 +1002,34 @@ namespace CodexInputUsage
             _ctxWeights[channel] = cur + weight;
         }
 
-        private bool ConsumeFastResponseItem(string line)
-        {
-            int headLen = Math.Min(line.Length, 320);
-            string head = line.Substring(0, headLen);
-            // Subtract ~120 chars of JSON envelope overhead so empty/short records stay realistic
-            int payloadChars = Math.Max(0, line.Length - 120);
-            if (payloadChars <= 0) return false;
-            double est = EstimateTokensFast(line) - 24.0;
-            if (est < 1.0) est = 1.0;
+        // Only the compact canonical envelope takes the fast path. Alternate ordering or spacing
+        // is handled by the JSON parser, so nested content cannot be mistaken for a payload field.
+        private static readonly Regex ResponsePrefix = new Regex(
+            @"^\{(?:""timestamp"":""[^""]*"",)?""type"":""response_item"",""payload"":(?<payload>\{""type"":""(?<kind>[a-z_]+)"")",
+            RegexOptions.Compiled);
+        private static readonly Regex ImageEncoding = new Regex(
+            @"(?i)(data:image/[a-z0-9.+-]+;base64,)[a-z0-9+/=_-]+", RegexOptions.Compiled);
 
-            if (head.IndexOf("\"custom_tool_call_output\"", StringComparison.Ordinal) >= 0
-                || head.IndexOf("\"function_call_output\"", StringComparison.Ordinal) >= 0
-                || head.IndexOf("\"web_search_call\"", StringComparison.Ordinal) >= 0)
+        private bool TryConsumeFastResponseItem(string line)
+        {
+            if (line.IndexOf("\"type\":\"response_item\"", StringComparison.Ordinal) < 0) return false;
+            var match = ResponsePrefix.Match(line.Substring(0, Math.Min(line.Length, 320)));
+            if (!match.Success || !line.EndsWith("}}", StringComparison.Ordinal)) return false;
+            string kind = match.Groups["kind"].Value;
+            if (kind == "reasoning" || kind == "additional_tools") return false;
+
+            string role = null;
+            if (kind == "message")
             {
-                AddCtxWeight("toolResults", est);
-                return false;
+                const string rolePrefix = ",\"role\":\"";
+                if (string.CompareOrdinal(line, match.Length, rolePrefix, 0, rolePrefix.Length) != 0) return false;
+                int start = match.Length + rolePrefix.Length;
+                int end = line.IndexOf('"', start);
+                if (end < 0 || end >= 320) return false;
+                role = line.Substring(start, end - start);
             }
-            if (head.IndexOf("\"custom_tool_call\"", StringComparison.Ordinal) >= 0
-                || head.IndexOf("\"function_call\"", StringComparison.Ordinal) >= 0
-                || head.IndexOf("\"reasoning\"", StringComparison.Ordinal) >= 0)
-            {
-                AddCtxWeight("assistant", est);
-                return false;
-            }
-            if (head.IndexOf("\"compaction\"", StringComparison.Ordinal) >= 0)
-            {
-                AddCtxWeight("checkpoint", est);
-                return false;
-            }
-            if (head.IndexOf("\"role\":\"assistant\"", StringComparison.Ordinal) >= 0)
-            {
-                AddCtxWeight("assistant", est);
-                return false;
-            }
-            if (head.IndexOf("\"role\":\"user\"", StringComparison.Ordinal) >= 0)
-            {
-                if (line.IndexOf("<subagent_notification>", StringComparison.OrdinalIgnoreCase) >= 0)
-                    AddCtxWeight("subagentMsg", est);
-                else
-                    AddCtxWeight("userInput", est);
-                return false;
-            }
-            if (head.IndexOf("\"role\":\"developer\"", StringComparison.Ordinal) >= 0)
-            {
-                if (line.IndexOf("mcp__", StringComparison.OrdinalIgnoreCase) >= 0
-                    && line.IndexOf("<tools>", StringComparison.OrdinalIgnoreCase) >= 0)
-                    AddCtxWeight("mcpTools", est);
-                else
-                    AddCtxWeight("systemPrompt", est);
-                return false;
-            }
-            return false;
+            string payload = line.Substring(match.Groups["payload"].Index, line.Length - match.Groups["payload"].Index - 1);
+            return AddResponseWeight(kind, role, payload);
         }
 
         private void ConsumeParsedResponseItem(Dictionary<string, object> payload)
@@ -1024,25 +1056,47 @@ namespace CodexInputUsage
                 return;
             }
 
-            string role = GetStr(payload, "role");
-            string text = _json.Serialize(payload);
-            double est = EstimateTokensFast(text);
-            if (pType == "compaction") AddCtxWeight("checkpoint", est);
-            else if (pType == "custom_tool_call_output" || pType == "function_call_output" || pType == "web_search_call")
-                AddCtxWeight("toolResults", est);
-            else if (pType == "custom_tool_call" || pType == "function_call" || pType == "reasoning" || role == "assistant")
-                AddCtxWeight("assistant", est);
-            else if (role == "user")
+            if (pType == "reasoning")
             {
-                if (text.IndexOf("<subagent_notification>", StringComparison.OrdinalIgnoreCase) >= 0)
-                    AddCtxWeight("subagentMsg", est);
-                else
-                    AddCtxWeight("userInput", est);
+                payload.Remove("encrypted_content");
+                if (payload.Count == 1) return;
             }
+            AddResponseWeight(pType, GetStr(payload, "role"), _json.Serialize(payload));
+        }
+
+        private bool AddResponseWeight(string kind, string role, string text)
+        {
+            string channel;
+            if (kind == "compaction") channel = "checkpoint";
+            else if (kind == "custom_tool_call_output" || kind == "function_call_output" || kind == "web_search_call")
+                channel = "toolResults";
+            else if (kind == "custom_tool_call" || kind == "function_call" || kind == "reasoning" || role == "assistant")
+                channel = "assistant";
+            else if (role == "user") channel = ContainsMarker(text, "<subagent_notification>") ? "subagentMsg" : "userInput";
             else if (role == "developer")
             {
-                AddCtxWeight("systemPrompt", est);
+                if (ContainsMarker(text, "mcp__") && ContainsMarker(text, "<tools>")) channel = "mcpTools";
+                else if (ContainsMarker(text, "<skills_instructions>") || ContainsMarker(text, "<available_skills>")
+                    || ContainsMarker(text, "<skill>") || ContainsMarker(text, "## Available skills")) channel = "skills";
+                else if (ContainsMarker(text, "AGENTS.md") || ContainsMarker(text, "<INSTRUCTIONS>")
+                    || ContainsMarker(text, "# Global instructions")) channel = "userRules";
+                else channel = "systemPrompt";
             }
+            else if (role == "system") channel = "systemPrompt";
+            else return false;
+
+            if (ContainsMarker(text, "data:image/")) text = ImageEncoding.Replace(text, "$1");
+            AddCtxWeight(channel, EstimateTokensFast(text));
+            return true;
+        }
+
+        private static bool ContainsMarker(string text, string marker)
+        {
+            if (text.IndexOf(marker, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            // JavaScriptSerializer escapes angle brackets when the parsed payload is serialized.
+            if (marker[0] != '<') return false;
+            string escaped = marker.Replace("<", "\\u003c").Replace(">", "\\u003e");
+            return text.IndexOf(escaped, StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private void ConsumeWorldState(Dictionary<string, object> payload)
@@ -1183,7 +1237,7 @@ namespace CodexInputUsage
             return (ascii * 0.25) + (nonAscii * 0.65);
         }
 
-        private static long ComputeDurationWithoutToolsMs(MutableTurn turn)
+        private static long ComputeDurationWithoutToolsMs(MutableTurn turn, out long? wallDurationMs, out long toolExclusiveMs)
         {
             // Match src/usage-state.mjs exact formula:
             //   durationWithoutTools = turnWallDurationMs - (union(toolItems) minus overlap with modelItems)
@@ -1193,24 +1247,33 @@ namespace CodexInputUsage
             long startMs;
             long endMs;
 
-            if (turn.WallDurationMs.HasValue && turn.WallDurationMs.Value > 0 && turn.CompletedAtMs.HasValue)
+            toolExclusiveMs = 0;
+            wallDurationMs = turn.WallDurationMs;
+            if (turn.WallDurationMs > 0 && turn.CompletedAtMs.HasValue)
             {
                 wallMs = turn.WallDurationMs.Value;
                 endMs = turn.CompletedAtMs.Value;
                 startMs = endMs - wallMs;
             }
-            else if (turn.StartedAtMs.HasValue && turn.LastEventAtMs.HasValue && turn.LastEventAtMs.Value > turn.StartedAtMs.Value)
+            else if (turn.WallDurationMs > 0 && turn.StartedAtMs.HasValue)
+            {
+                wallMs = turn.WallDurationMs.Value;
+                startMs = turn.StartedAtMs.Value;
+                endMs = startMs + wallMs;
+            }
+            else if (turn.StartedAtMs.HasValue && (turn.CompletedAtMs ?? turn.LastEventAtMs) > turn.StartedAtMs)
             {
                 startMs = turn.StartedAtMs.Value;
-                endMs = turn.LastEventAtMs.Value;
+                endMs = (turn.CompletedAtMs ?? turn.LastEventAtMs).Value;
                 wallMs = endMs - startMs;
             }
             else
             {
-                // Last-resort fallback if turn boundary timestamps were not observed
-                return MergeIntervalsMs(turn.ModelItems.Values);
+                // Without turn bounds only the reported duration or observed model intervals are known.
+                return wallDurationMs ?? MergeIntervalsMs(turn.ModelItems.Values);
             }
 
+            wallDurationMs = wallMs;
             var tools = new List<Interval>();
             foreach (var iv in turn.ToolItems.Values)
             {
@@ -1246,8 +1309,8 @@ namespace CodexInputUsage
                 }
             }
 
-            long result = wallMs - Math.Max(0, toolMs);
-            return result > 0 ? result : 0;
+            toolExclusiveMs = Math.Max(0, toolMs);
+            return wallMs - toolExclusiveMs;
         }
 
         private static List<Interval> MergeIntervals(IEnumerable<Interval> intervals)
