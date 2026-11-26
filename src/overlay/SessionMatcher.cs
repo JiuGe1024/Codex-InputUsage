@@ -23,6 +23,8 @@ namespace CodexInputUsage
         private const int TailCorpusBytes = 2 * 1024 * 1024;
         private const int HeadCorpusBytes = 256 * 1024;
         private const int MaxLocalBodyCandidates = 80;
+        private const int MaxCorpusEntries = 32;
+        private const int MaxCorpusChars = 8 * 1024 * 1024;
         private static readonly Regex MultiSpace = new Regex(@"\s+", RegexOptions.Compiled);
 
         private sealed class CachedCorpus
@@ -30,9 +32,12 @@ namespace CodexInputUsage
             internal string Path;
             internal long FileLength;
             internal string NormalizedText;
+            internal LinkedListNode<string> Access;
         }
 
         private readonly Dictionary<string, CachedCorpus> _corpusCache = new Dictionary<string, CachedCorpus>(StringComparer.OrdinalIgnoreCase);
+        private readonly LinkedList<string> _corpusLru = new LinkedList<string>();
+        private int _corpusChars;
         private readonly JavaScriptSerializer _json = new JavaScriptSerializer { MaxJsonLength = 8 * 1024 * 1024 };
         private Dictionary<string, string> _sessionIndexNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         private DateTime _sessionIndexWriteUtc = DateTime.MinValue;
@@ -70,6 +75,13 @@ namespace CodexInputUsage
                 };
             }
 
+            return ResolveIpcCandidates(candidates, followed.Length, headerTexts, bodyTexts, GetNormalizedCorpus, ResolveRollout);
+        }
+
+        private static SessionMatchResult ResolveIpcCandidates(List<StateThreadRecord> candidates, int followedCount,
+            string[] headerTexts, string[] bodyTexts, Func<StateThreadRecord, string> corpus,
+            Func<StateThreadRecord, string> rolloutPath)
+        {
             string[] normHeaders = NormalizeSnippets(headerTexts, 3, 160);
             string[] normBodies = NormalizeSnippets(bodyTexts, 12, 220);
 
@@ -81,11 +93,11 @@ namespace CodexInputUsage
                 return new SessionMatchResult
                 {
                     ThreadId = win.Id,
-                    RolloutPath = ResolveRollout(win),
+                    RolloutPath = rolloutPath(win),
                     ModelName = win.Model,
                     ReasoningEffort = win.ReasoningEffort,
                     Source = "IPC+标题",
-                    Detail = string.Format("followed={0} headerHit=\"{1}\"", followed.Length, Truncate(win.Name ?? win.Title, 32))
+                    Detail = string.Format("followed={0} headerHits=1 hdrCount={1}", followedCount, normHeaders.Length)
                 };
             }
 
@@ -95,30 +107,30 @@ namespace CodexInputUsage
             if (normBodies.Length > 0)
             {
                 int bestScore, secondScore, bestMaxLen;
-                StateThreadRecord bodyWinner = MatchByBodyText(bodyPool, normBodies, out bestScore, out secondScore, out bestMaxLen);
+                StateThreadRecord bodyWinner = MatchByBodyText(bodyPool, normBodies, corpus, out bestScore, out secondScore, out bestMaxLen);
                 if (bodyWinner != null && IsClearBodyWinner(bestScore, secondScore))
                 {
                     return new SessionMatchResult
                     {
                         ThreadId = bodyWinner.Id,
-                        RolloutPath = ResolveRollout(bodyWinner),
+                        RolloutPath = rolloutPath(bodyWinner),
                         ModelName = bodyWinner.Model,
                         ReasoningEffort = bodyWinner.ReasoningEffort,
                         Source = "IPC+正文",
-                        Detail = string.Format("followed={0} bodyScore={1} second={2}", followed.Length, bestScore, secondScore)
+                        Detail = string.Format("followed={0} bodyScore={1} second={2}", followedCount, bestScore, secondScore)
                     };
                 }
             }
 
             // Step 3: If ONLY ONE conversation is followed in IPC and UIA didn't contradict it, bind it.
             // (Covers brand-new empty chats or chats whose title hasn't appeared yet.)
-            if (followed.Length == 1)
+            if (followedCount == 1)
             {
                 var only = candidates[0];
                 return new SessionMatchResult
                 {
                     ThreadId = only.Id,
-                    RolloutPath = ResolveRollout(only),
+                    RolloutPath = rolloutPath(only),
                     ModelName = only.Model,
                     ReasoningEffort = only.ReasoningEffort,
                     Source = "IPC",
@@ -133,100 +145,33 @@ namespace CodexInputUsage
                 ThreadId = null,
                 RolloutPath = null,
                 Source = "待确认",
-                Detail = string.Format("ambiguous followed={0} headerHits={1} uiHeaders=[{2}] uiBodies={3}",
-                    followed.Length,
+                Detail = string.Format("ambiguous followed={0} headerHits={1} hdrCount={2} uiBodies={3}",
+                    followedCount,
                     headerHits.Count,
-                    string.Join("|", normHeaders.Take(4).Select(s => Truncate(s, 24)).ToArray()),
+                    normHeaders.Length,
                     normBodies.Length)
             };
         }
 
         internal SessionMatchResult ResolveFromCandidatesForTest(
-            List<StateThreadRecord> candidates,
-            Dictionary<string, string> corpusById,
-            string[] headerTexts,
-            string[] bodyTexts)
+            List<StateThreadRecord> candidates, Dictionary<string, string> corpusById, string[] headerTexts, string[] bodyTexts)
         {
-            string[] normHeaders = NormalizeSnippets(headerTexts, 3, 160);
-            string[] normBodies = NormalizeSnippets(bodyTexts, 12, 220);
-
-            var headerHits = MatchByHeader(candidates, normHeaders);
-            if (headerHits.Count == 1)
-            {
-                return new SessionMatchResult { ThreadId = headerHits[0].Id, Source = "IPC+标题", Detail = "test-header" };
-            }
-
-            var pool = headerHits.Count > 1 ? headerHits : candidates;
-            if (normBodies.Length > 0)
-            {
-                int best = 0, second = 0;
-                StateThreadRecord win = null;
-                for (int i = 0; i < pool.Count; i++)
-                {
-                    string corpus;
-                    if (!corpusById.TryGetValue(pool[i].Id, out corpus)) corpus = string.Empty;
-                    string normCorpus = NormalizeText(corpus);
-                    int maxLen;
-                    int score = CountSnippetHits(normCorpus, normBodies, out maxLen);
-                    if (score > best) { second = best; best = score; win = pool[i]; }
-                    else if (score > second) { second = score; }
-                }
-                if (win != null && IsClearBodyWinner(best, second))
-                {
-                    return new SessionMatchResult { ThreadId = win.Id, Source = "IPC+正文", Detail = "test-body" };
-                }
-            }
-
-            if (candidates.Count == 1)
-                return new SessionMatchResult { ThreadId = candidates[0].Id, Source = "IPC", Detail = "test-single" };
-
-            return new SessionMatchResult { ThreadId = null, Source = "待确认", Detail = "test-ambiguous" };
+            return ResolveIpcCandidates(candidates, candidates.Count, headerTexts, bodyTexts,
+                rec => TestCorpus(corpusById, rec), rec => rec.RolloutPath);
         }
 
         internal SessionMatchResult ResolveLocalFromCandidatesForTest(
-            List<StateThreadRecord> candidates,
-            Dictionary<string, string> corpusById,
-            string[] headerTexts,
-            string[] bodyTexts)
+            List<StateThreadRecord> candidates, Dictionary<string, string> corpusById, string[] headerTexts, string[] bodyTexts)
         {
-            string[] headers = NormalizeSnippets(headerTexts, 3, 160);
-            string[] bodies = NormalizeSnippets(bodyTexts, 14, 220);
-            if (headers.Length == 0 && bodies.Length == 0)
-                return new SessionMatchResult { Source = "IPC 断线", Detail = "test-local-empty" };
+            return ResolveLocalCandidates(candidates, NormalizeSnippets(headerTexts, 3, 160),
+                NormalizeSnippets(bodyTexts, 14, 220), rec => TestCorpus(corpusById, rec),
+                rec => rec.RolloutPath, rec => corpusById.ContainsKey(rec.Id));
+        }
 
-            var hits = MatchByHeader(candidates, headers, false, 6);
-            if (hits.Count == 1)
-                return new SessionMatchResult { ThreadId = hits[0].Id, Source = "本地+标题", Detail = "test-local-header" };
-
-            var pool = hits.Count > 1 ? hits : candidates;
-            if (bodies.Length > 0)
-            {
-                int best = 0, second = 0, bestMaxLen = 0;
-                StateThreadRecord win = null;
-                for (int i = 0; i < pool.Count; i++)
-                {
-                    string corpus;
-                    if (!corpusById.TryGetValue(pool[i].Id, out corpus)) corpus = string.Empty;
-                    string normCorpus = NormalizeText(corpus);
-                    int maxLen;
-                    int score = CountSnippetHits(normCorpus, bodies, out maxLen);
-                    if (score > best)
-                    {
-                        second = best;
-                        best = score;
-                        bestMaxLen = maxLen;
-                        win = pool[i];
-                    }
-                    else if (score > second)
-                    {
-                        second = score;
-                    }
-                }
-                if (win != null && IsClearLocalBodyWinner(best, second, bestMaxLen))
-                    return new SessionMatchResult { ThreadId = win.Id, Source = "本地+正文", Detail = "test-local-body" };
-            }
-
-            return new SessionMatchResult { ThreadId = null, Source = "待确认", Detail = "test-local-ambiguous" };
+        private static string TestCorpus(Dictionary<string, string> corpusById, StateThreadRecord rec)
+        {
+            string text;
+            return corpusById.TryGetValue(rec.Id, out text) ? NormalizeText(text) : string.Empty;
         }
 
         private List<StateThreadRecord> LoadCandidates(string[] followedIds)
@@ -291,7 +236,14 @@ namespace CodexInputUsage
                 };
             }
 
-            var candidates = LoadAllLocalCandidates();
+            return ResolveLocalCandidates(LoadAllLocalCandidates(), headers, bodies, GetNormalizedCorpus,
+                ResolveRollout, rec => !string.IsNullOrWhiteSpace(rec.RolloutPath) && File.Exists(rec.RolloutPath));
+        }
+
+        private static SessionMatchResult ResolveLocalCandidates(List<StateThreadRecord> candidates, string[] headers,
+            string[] bodies, Func<StateThreadRecord, string> corpus, Func<StateThreadRecord, string> rolloutPath,
+            Func<StateThreadRecord, bool> hasRollout)
+        {
             if (candidates.Count == 0)
             {
                 return new SessionMatchResult
@@ -306,7 +258,7 @@ namespace CodexInputUsage
             if (headerHits.Count == 1)
             {
                 var win = headerHits[0];
-                string rollout = ResolveRollout(win);
+                string rollout = rolloutPath(win);
                 return new SessionMatchResult
                 {
                     ThreadId = win.Id,
@@ -314,8 +266,8 @@ namespace CodexInputUsage
                     ModelName = win.Model,
                     ReasoningEffort = win.ReasoningEffort,
                     Source = "本地+标题",
-                    Detail = string.Format("local-hdr=\"{0}\" rollout={1}",
-                        Truncate(win.Name ?? win.Title, 28),
+                    Detail = string.Format("local-hdr hdrCount={0} rollout={1}",
+                        headers.Length,
                         !string.IsNullOrEmpty(rollout) ? "ok" : "missing")
                 };
             }
@@ -330,15 +282,14 @@ namespace CodexInputUsage
                 var bodyPool = new List<StateThreadRecord>();
                 for (int i = 0; i < sourcePool.Count && bodyPool.Count < MaxLocalBodyCandidates; i++)
                 {
-                    string rp = sourcePool[i].RolloutPath;
-                    if (!string.IsNullOrWhiteSpace(rp) && File.Exists(rp))
+                    if (hasRollout(sourcePool[i]))
                         bodyPool.Add(sourcePool[i]);
                 }
                 bodyPoolCount = bodyPool.Count;
 
                 if (bodyPool.Count > 0)
                 {
-                    StateThreadRecord winner = MatchByBodyText(bodyPool, bodies, out best, out second, out bestMaxLen);
+                    StateThreadRecord winner = MatchByBodyText(bodyPool, bodies, corpus, out best, out second, out bestMaxLen);
                     if (winner != null && IsClearLocalBodyWinner(best, second, bestMaxLen))
                     {
                         return new SessionMatchResult
@@ -360,13 +311,13 @@ namespace CodexInputUsage
                 ThreadId = null,
                 RolloutPath = null,
                 Source = "待确认",
-                Detail = string.Format("local-miss cands={0} bodyPool={1} hdrHits={2} best={3} sec={4} hdrs=[{5}] bodies={6}",
+                Detail = string.Format("local-miss cands={0} bodyPool={1} hdrHits={2} best={3} sec={4} hdrCount={5} bodies={6}",
                     candidates.Count,
                     bodyPoolCount,
                     headerHits.Count,
                     best,
                     second,
-                    string.Join("|", headers.Take(4).Select(s => Truncate(s, 22)).ToArray()),
+                    headers.Length,
                     bodies.Length)
             };
         }
@@ -425,9 +376,10 @@ namespace CodexInputUsage
             return hits;
         }
 
-        private StateThreadRecord MatchByBodyText(
+        private static StateThreadRecord MatchByBodyText(
             List<StateThreadRecord> pool,
             string[] normBodies,
+            Func<StateThreadRecord, string> readCorpus,
             out int bestScore,
             out int secondScore,
             out int bestMaxSnippetLen)
@@ -440,7 +392,7 @@ namespace CodexInputUsage
             for (int i = 0; i < pool.Count; i++)
             {
                 var c = pool[i];
-                string corpus = GetNormalizedCorpus(c);
+                string corpus = readCorpus(c);
                 if (string.IsNullOrEmpty(corpus)) continue;
                 int maxLen;
                 int score = CountSnippetHits(corpus, normBodies, out maxLen);
@@ -509,6 +461,8 @@ namespace CodexInputUsage
                     && string.Equals(cached.Path, path, StringComparison.OrdinalIgnoreCase)
                     && cached.FileLength == fi.Length)
                 {
+                    _corpusLru.Remove(cached.Access);
+                    _corpusLru.AddLast(cached.Access);
                     return cached.NormalizedText;
                 }
 
@@ -530,18 +484,66 @@ namespace CodexInputUsage
                 }
 
                 string norm = NormalizeText(sb.ToString());
-                _corpusCache[rec.Id] = new CachedCorpus
+                RememberCorpus(rec.Id, new CachedCorpus
                 {
                     Path = path,
                     FileLength = fi.Length,
                     NormalizedText = norm
-                };
+                });
                 return norm;
             }
             catch
             {
                 return NormalizeText((rec.Name ?? string.Empty) + " " + (rec.Title ?? string.Empty));
             }
+        }
+
+        private void RememberCorpus(string id, CachedCorpus entry)
+        {
+            if (_corpusCache.ContainsKey(id)) EvictCorpus(id);
+            if (entry.NormalizedText.Length > MaxCorpusChars) return;
+            while (_corpusCache.Count >= MaxCorpusEntries || _corpusChars + entry.NormalizedText.Length > MaxCorpusChars)
+                EvictCorpus(_corpusLru.First.Value);
+
+            entry.Access = _corpusLru.AddLast(id);
+            _corpusCache.Add(id, entry);
+            _corpusChars += entry.NormalizedText.Length;
+        }
+
+        private void EvictCorpus(string id)
+        {
+            var entry = _corpusCache[id];
+            _corpusLru.Remove(entry.Access);
+            _corpusChars -= entry.NormalizedText.Length;
+            _corpusCache.Remove(id);
+        }
+
+        internal void ClearCorpusCache()
+        {
+            _corpusLru.Clear();
+            _corpusCache.Clear();
+            _corpusChars = 0;
+        }
+
+        internal static bool CheckCorpusCache(string rolloutPath)
+        {
+            var matcher = new SessionMatcher();
+            var record = new StateThreadRecord { Id = "0", RolloutPath = rolloutPath };
+            matcher.GetNormalizedCorpus(record);
+            for (int i = 1; i < MaxCorpusEntries; i++)
+                matcher.RememberCorpus(i.ToString(), new CachedCorpus { NormalizedText = "x" });
+
+            matcher.GetNormalizedCorpus(record);
+            matcher.RememberCorpus("new", new CachedCorpus { NormalizedText = "x" });
+            bool lru = matcher._corpusCache.Count == MaxCorpusEntries
+                && matcher._corpusCache.ContainsKey("0") && !matcher._corpusCache.ContainsKey("1");
+
+            matcher.RememberCorpus("limit", new CachedCorpus { NormalizedText = new string('x', MaxCorpusChars) });
+            bool budget = matcher._corpusCache.Count == 1 && matcher._corpusChars == MaxCorpusChars
+                && matcher._corpusCache.ContainsKey("limit");
+            matcher.ClearCorpusCache();
+            return lru && budget && matcher._corpusCache.Count == 0
+                && matcher._corpusLru.Count == 0 && matcher._corpusChars == 0;
         }
 
         private void ScanRolloutRange(FileStream fs, long startOffset, long maxBytes, StringBuilder sb)
@@ -665,10 +667,5 @@ namespace CodexInputUsage
             return MultiSpace.Replace(s.Trim(), " ");
         }
 
-        private static string Truncate(string s, int max)
-        {
-            if (string.IsNullOrEmpty(s)) return string.Empty;
-            return s.Length <= max ? s : (s.Substring(0, max) + "…");
-        }
     }
 }

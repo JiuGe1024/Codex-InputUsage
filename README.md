@@ -1,6 +1,6 @@
 # Codex InputUsage
 
-面向 Windows 原生 Microsoft Store 版 Codex Desktop 的轻量伴随用量监控浮层（**无 CDP、零外部依赖、单个约 245 KB 可执行文件**）。直接从原生图标启动 Codex，浮层自动随行停靠在输入框工具栏，提供实时速度、Token、缓存命中率、额度余量、十通道上下文拆分、调用明细与总汇总，以及多时段用量统计。
+面向 Windows 原生 Microsoft Store 版 Codex Desktop 的轻量伴随用量监控浮层（**无 CDP、零外部依赖、单个约 252 KB 可执行文件**）。直接从原生图标启动 Codex，浮层自动随行停靠在输入框工具栏，提供实时速度、Token、缓存命中率、额度余量、十通道上下文拆分、调用明细与总汇总，以及多时段用量统计。
 
 ## 界面预览
 
@@ -69,12 +69,16 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/Uninstall-AutoSt
 .\outputs\Codex-InputUsage-Overlay.exe --self-test
 ```
 
-自检报告（9 组核心断言）与明暗双主题、150% DPI 各页签预览图输出至 `work/`（不干扰正在运行的浮层实例）。
+自检报告（10 组核心断言）与明暗双主题、150% DPI 各页签预览图输出至 `work/`（不干扰正在运行的浮层实例）。
+
+## 隐私与安全
+
+正常启动默认不记录常规诊断日志，也不截屏。浮层在本机处理用量和会话匹配数据。需要排查时，可传入 `--diag` 写入脱敏定位日志，或传入 `--diag-capture` 单独保存首次停靠区域截图。文件保存在 `%LOCALAPPDATA%\CodexInputUsage`。截图可能含屏幕上的会话信息。
 
 ## 目录结构
 
 ```text
-src/overlay/                  # 伴随浮层全部 C# 源码（19 个模块）
+src/overlay/                  # 伴随浮层全部 C# 源码（21 个模块）
 scripts/
   Build-OverlayPrototype.ps1  # 零依赖 csc.exe 构建脚本
   Install-AutoStart.ps1       # 注册 ~/.codex/config.toml 无工具 MCP 伴随入口

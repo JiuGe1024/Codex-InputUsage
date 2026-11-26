@@ -246,9 +246,11 @@ namespace CodexInputUsage
             if (_slotQuota5hItem != null) _slotQuota5hItem.Checked = prefs.ShowQuota5h;
         }
 
-        internal void SetAutoStartChecked(bool enabled)
+        internal void SetAutoStartState(bool enabled, bool available, string label)
         {
-            if (_autoStartItem != null) _autoStartItem.Checked = enabled;
+            _autoStartItem.Checked = enabled;
+            _autoStartItem.Enabled = available;
+            _autoStartItem.Text = label;
         }
 
         protected override bool ShowWithoutActivation { get { return true; } }

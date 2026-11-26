@@ -1,10 +1,16 @@
 # Codex InputUsage 当前状态
 
-更新于 2026-11-25。独立仓库维护（面向 Windows 原生 Microsoft Store 版 Codex Desktop 的无 CDP 伴随浮层）。
+更新于 2026-11-26。独立仓库维护（面向 Windows 原生 Microsoft Store 版 Codex Desktop 的无 CDP 伴随浮层）。
+
+## 隐私与伴随启动
+
+- 常规日志与首次停靠截图默认关闭，分别由 `--diag` 和 `--diag-capture` 开启。诊断日志保留坐标、耗时和匹配计数，异常报告仅记录类型、线程和堆栈。
+- 伴随菜单和两份安装脚本共用 `CodexCompanionConfig`。启用前检查脚本、Node.js 和 Codex 配置，配置采用同目录原子替换，缺少依赖时仍可卸载现有配置。
+- 会话正文缓存按 LRU 淘汰，上限为 32 条和 8 Mi 字符，进入待机时释放缓存。
 
 ## 核心架构（无 CDP 路线）
 
-产物 `outputs/Codex-InputUsage-Overlay.exe`（.NET Framework 4.x `csc.exe` 零外部依赖构建，约 245 KB）随 Windows 原生 Microsoft Store 版 Codex Desktop 伴随运行，源码全部位于 `src/overlay/`（19 个模块）：
+产物 `outputs/Codex-InputUsage-Overlay.exe`（.NET Framework 4.x `csc.exe` 零外部依赖构建，约 252 KB）随 Windows 原生 Microsoft Store 版 Codex Desktop 伴随运行，源码全部位于 `src/overlay/`（21 个模块）：
 
 | 模块 | 职责 |
 |---|---|

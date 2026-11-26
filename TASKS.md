@@ -1,8 +1,10 @@
 # Codex InputUsage 任务清单
 
-更新于 2026-11-25。
+更新于 2026-11-26。
 
 ## 已完成
+
+- [x] 加固诊断隐私、伴随启动前置检测与原子 TOML 写回，并限制会话正文缓存。十组自检及临时配置脚本验证通过。
 
 - [x] 排查并解决无 CDP 浮层实机可见性问题（隔离桌面边界识别、前台 HWND 直接反查、`SetWindowPos(HWND_TOPMOST)`、现场诊断日志与截图）
 - [x] 重构为模块化 `src/overlay/` 架构，实现输入框底栏透明无缝停靠（参考 `dongyue-19/codex-statusbar`）— `acfd0d8`

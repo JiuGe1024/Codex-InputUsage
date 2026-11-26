@@ -561,7 +561,7 @@ namespace CodexInputUsage
                         composer = contextEl = modelEl = null;
                         string error = ex.GetType().Name;
                         if (lastProviderError != error)
-                            Program.LogDiag(string.Format("geometry-uia-retry hwnd=0x{0:X} error={1}", hwnd.ToInt64(), ex));
+                            Program.LogDiag(string.Format("geometry-uia-retry hwnd=0x{0:X} error={1}", hwnd.ToInt64(), ex.GetType().Name));
                         lastProviderError = error;
                         _wakeSignal.WaitOne(220);
                         continue;

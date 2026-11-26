@@ -7,7 +7,6 @@ using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
 using System.Text;
-using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
@@ -18,10 +17,6 @@ namespace CodexInputUsage
     {
         private const string LegacyRunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
         private const string LegacyValueName = "CodexInputUsageOverlay";
-        private static readonly Regex SectionRegex = new Regex(
-            @"(?ms)\r?\n?\[mcp_servers\.codex_input_usage\]\r?\n(?:(?!\[).*(?:\r?\n|$))*",
-            RegexOptions.Compiled);
-
         private static string GetConfigPath()
         {
             return Path.Combine(CodexThemeSource.GetCodexHome(), "config.toml");
@@ -30,33 +25,6 @@ namespace CodexInputUsage
         private static string GetCompanionScriptPath()
         {
             return Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, @"..\scripts\codex-mcp-companion.mjs"));
-        }
-
-        private static string FindNodeExecutable()
-        {
-            string[] candidates = new string[]
-            {
-                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), @"nodejs\node.exe"),
-                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), @"nodejs\node.exe")
-            };
-            for (int i = 0; i < candidates.Length; i++)
-            {
-                if (File.Exists(candidates[i])) return candidates[i];
-            }
-            string pathEnv = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
-            string[] dirs = pathEnv.Split(';');
-            for (int i = 0; i < dirs.Length; i++)
-            {
-                string d = dirs[i].Trim();
-                if (d.Length == 0) continue;
-                try
-                {
-                    string p = Path.Combine(d, "node.exe");
-                    if (File.Exists(p)) return p;
-                }
-                catch { }
-            }
-            return "node.exe";
         }
 
         private static void CleanupLegacyRunKey()
@@ -79,38 +47,30 @@ namespace CodexInputUsage
                 string cfg = GetConfigPath();
                 if (!File.Exists(cfg)) return false;
                 string text = File.ReadAllText(cfg, Encoding.UTF8);
-                return SectionRegex.IsMatch(text);
+                return CodexCompanionConfig.IsEnabled(text);
             }
             catch { return false; }
         }
 
+        internal static string EnableProblem()
+        {
+            return CodexCompanionConfig.EnableProblem(GetConfigPath(), GetCompanionScriptPath(),
+                CodexCompanionConfig.FindNodeExecutable());
+        }
+
         internal static bool SetEnabled(bool enable)
         {
-            CleanupLegacyRunKey();
             try
             {
-                string cfg = GetConfigPath();
-                if (!File.Exists(cfg)) return false;
-                string content = File.ReadAllText(cfg, Encoding.UTF8);
-                string cleaned = SectionRegex.Replace(content, string.Empty).TrimEnd();
-                string next;
-                if (enable)
-                {
-                    string node = FindNodeExecutable();
-                    string script = GetCompanionScriptPath();
-                    next = cleaned
-                        + "\r\n\r\n[mcp_servers.codex_input_usage]\r\n"
-                        + "command = '" + node + "'\r\n"
-                        + "args = ['" + script + "']\r\n";
-                }
-                else
-                {
-                    next = cleaned + "\r\n";
-                }
-                File.WriteAllText(cfg, next, new UTF8Encoding(false));
+                if (!CodexCompanionConfig.Update(GetConfigPath(), GetCompanionScriptPath(),
+                    enable ? CodexCompanionConfig.FindNodeExecutable() : null, enable))
+                    return false;
+                CleanupLegacyRunKey();
                 return true;
             }
-            catch { return false; }
+            catch (IOException) { return false; }
+            catch (UnauthorizedAccessException) { return false; }
+            catch (DecoderFallbackException) { return false; }
         }
     }
 
@@ -120,11 +80,26 @@ namespace CodexInputUsage
         private static string _diagLogPath;
         private static string _diagCapturePath;
 
+        [Flags]
+        internal enum Diagnostics { None = 0, Log = 1, Capture = 2 }
+
+        internal static Diagnostics GetDiagnostics(string[] args)
+        {
+            Diagnostics options = Diagnostics.None;
+            if (args.Contains("--diag", StringComparer.OrdinalIgnoreCase)) options |= Diagnostics.Log;
+            if (args.Contains("--diag-capture", StringComparer.OrdinalIgnoreCase)) options |= Diagnostics.Capture;
+            return options;
+        }
+
+        private static string DiagnosticDirectory()
+        {
+            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CodexInputUsage");
+        }
+
         [STAThread]
         private static void Main(string[] args)
         {
             NativeWin32.SetProcessDpiAwarenessContext(new IntPtr(-4));
-            InitDiagPaths();
 
             if (args.Length >= 1 && args[0] == "--self-test")
             {
@@ -150,18 +125,17 @@ namespace CodexInputUsage
             bool owns;
             using (var single = new Mutex(true, @"Local\CodexInputUsage.OverlayPrototype", out owns))
             {
-                if (!owns)
-                {
-                    LogDiag("startup skipped: another instance holds mutex");
-                    return;
-                }
+                if (!owns) return;
 
-                ResetDiagFiles();
-                LogStartup(exitWithCodex);
+                InitDiagnostics(GetDiagnostics(args));
+                if (_diagLogPath != null) LogStartup(exitWithCodex);
                 AppDomain.CurrentDomain.UnhandledException += delegate(object sender, UnhandledExceptionEventArgs e)
                 {
-                    LogDiag(string.Format("unhandled thread={0} terminating={1} {2}",
-                        Thread.CurrentThread.Name ?? "unnamed", e.IsTerminating, e.ExceptionObject));
+                    var ex = e.ExceptionObject as Exception;
+                    if (ex != null)
+                        WriteDiagnostic("crash.log", string.Format("thread={0} terminating={1} type={2}{3}{4}",
+                            Thread.CurrentThread.Name ?? "unnamed", e.IsTerminating, ex.GetType().FullName,
+                            Environment.NewLine, new StackTrace(ex, false)));
                 };
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
@@ -191,25 +165,25 @@ namespace CodexInputUsage
 
                 var cands = new List<StateThreadRecord>
                 {
-                    new StateThreadRecord { Id = "thread-a", Name = "阅读工作区交接文档", Title = "阅读一下工作区内的交接文档" },
-                    new StateThreadRecord { Id = "thread-b", Name = "修复反重力代理访问", Title = "反重力代理连接" },
-                    new StateThreadRecord { Id = "thread-c", Name = "阅读工作区交接文档", Title = "另一个同名交接" }
+                    new StateThreadRecord { Id = "thread-a", Name = "测试样本共同标题阿尔法", Title = "测试样本阿尔法的第一个标题" },
+                    new StateThreadRecord { Id = "thread-b", Name = "测试样本标题贝塔条目", Title = "测试样本贝塔的标题" },
+                    new StateThreadRecord { Id = "thread-c", Name = "测试样本共同标题阿尔法", Title = "测试样本阿尔法的第三个标题" }
                 };
                 var corpus = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
                 {
-                    { "thread-a", "这是第一段 68.6M 会话的独有正文内容，用于精确区分同名对话。" },
-                    { "thread-b", "这是反重力代理配置相关的回复文本。" },
-                    { "thread-c", "这是第三个同名会话完全不同的正文内容。" }
+                    { "thread-a", "这是虚构样本阿尔法甲组的独有正文内容，用于精确区分同名对话。" },
+                    { "thread-b", "这是虚构样本贝塔的独立回复文本。" },
+                    { "thread-c", "这是虚构样本阿尔法乙组完全不同的正文内容。" }
                 };
 
                 // Unique header match -> thread-b
-                var mHeader = matcher.ResolveFromCandidatesForTest(cands, corpus, new string[] { "修复反重力代理访问" }, new string[0]);
+                var mHeader = matcher.ResolveFromCandidatesForTest(cands, corpus, new string[] { "测试样本标题贝塔条目" }, new string[0]);
                 bool okHeader = mHeader.ThreadId == "thread-b" && mHeader.Source == "IPC+标题";
 
                 // Duplicate title -> breaks tie using visible body text -> thread-a
                 var mBody = matcher.ResolveFromCandidatesForTest(cands, corpus,
-                    new string[] { "阅读工作区交接文档" },
-                    new string[] { "这是第一段 68.6M 会话的独有正文内容" });
+                    new string[] { "测试样本共同标题阿尔法" },
+                    new string[] { "这是虚构样本阿尔法甲组的独有正文内容" });
                 bool okBody = mBody.ThreadId == "thread-a" && mBody.Source == "IPC+正文";
 
                 // Multiple warm threads with NO matching header or body -> MUST refuse to guess (null)
@@ -223,14 +197,14 @@ namespace CodexInputUsage
 
                 // Local matching (used when Codex 26.1117+ removes \\.\pipe\codex-ipc):
                 // 1) truncated title prefix match, 2) body match beyond top-12, 3) single long unique snippet, 4) refuse ambiguous
-                var mLocHdr = matcher.ResolveLocalFromCandidatesForTest(cands, corpus, new string[] { "修复反重力代理…" }, new string[0]);
+                var mLocHdr = matcher.ResolveLocalFromCandidatesForTest(cands, corpus, new string[] { "测试样本标题贝塔…" }, new string[0]);
                 bool okLocHdr = mLocHdr.ThreadId == "thread-b" && mLocHdr.Source == "本地+标题";
 
                 var mLocSingle = matcher.ResolveLocalFromCandidatesForTest(cands, corpus, new string[0],
-                    new string[] { "这是第一段 68.6M 会话的独有正文内容，用于精确区分同名对话。" });
+                    new string[] { "这是虚构样本阿尔法甲组的独有正文内容，用于精确区分同名对话。" });
                 bool okLocSingle = mLocSingle.ThreadId == "thread-a" && mLocSingle.Source == "本地+正文";
 
-                var mLocAmbig = matcher.ResolveLocalFromCandidatesForTest(cands, corpus, new string[] { "阅读工作区交接文档" }, new string[0]);
+                var mLocAmbig = matcher.ResolveLocalFromCandidatesForTest(cands, corpus, new string[] { "测试样本共同标题阿尔法" }, new string[0]);
                 bool okLocAmbig = mLocAmbig.ThreadId == null && mLocAmbig.Source == "待确认";
 
                 sb.AppendLine(string.Format("match_tests pool={0} header={1} bodyTieBreak={2} refuseAmbig={3} disconnectClear={4} localHdr={5} localSingle={6} localRefuseAmbig={7}",
@@ -268,18 +242,8 @@ namespace CodexInputUsage
                 string.Join(",", liveIpc.FollowedThreadIds.Select(id => MetricFormatter.ShortThreadId(id)).ToArray()),
                 liveIpc.LastError ?? ""));
 
-            // 3. Cross-check a specific thread (prefer 01a1b9da if present, else first followed or first real thread with rollout)
-            string testThread = null;
-            for (int i = 0; i < liveIpc.FollowedThreadIds.Length; i++)
-            {
-                if (liveIpc.FollowedThreadIds[i].StartsWith("01a1b9da", StringComparison.OrdinalIgnoreCase))
-                {
-                    testThread = liveIpc.FollowedThreadIds[i];
-                    break;
-                }
-            }
-            if (testThread == null && liveIpc.FollowedThreadIds.Length > 0)
-                testThread = liveIpc.FollowedThreadIds[0];
+            // 3. Cross-check one followed thread or the first local thread with a rollout.
+            string testThread = liveIpc.FollowedThreadIds.FirstOrDefault();
             if (testThread == null)
             {
                 for (int i = 0; i < realThreads.Count; i++)
@@ -485,8 +449,9 @@ namespace CodexInputUsage
             }
             sb.AppendLine(string.Format("dpi_tests logicalHit={0} workArea={1}", dpiHit, dpiBounds));
             bool dockPerfOk = CheckDockPerformance(sb);
+            bool privacyOk = PrivacySecurityChecks.Run(sb, workDir);
             File.WriteAllText(Path.Combine(workDir, "selftest-report.txt"), sb.ToString(), Encoding.UTF8);
-            if (!quotaFuture || !quotaReset || !quotaMissing || !dpiHit || !dpiBounds || !stripStyleOk || !modelNameOk || !turnsSummaryOk || !usageStatsOk || !dockPerfOk) Environment.ExitCode = 1;
+            if (!quotaFuture || !quotaReset || !quotaMissing || !dpiHit || !dpiBounds || !stripStyleOk || !modelNameOk || !turnsSummaryOk || !usageStatsOk || !dockPerfOk || !privacyOk) Environment.ExitCode = 1;
         }
 
         private static bool CheckDockPerformance(StringBuilder report)
@@ -650,36 +615,32 @@ namespace CodexInputUsage
             report.AppendLine("dpi150_" + name + "_px=" + bitmap.Width + "x" + bitmap.Height);
         }
 
-        internal static void InitDiagPaths()
+        private static void InitDiagnostics(Diagnostics options)
         {
-            try
-            {
-                string workDir = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, @"..\work"));
-                Directory.CreateDirectory(workDir);
-                _diagLogPath = Path.Combine(workDir, "overlay-diag.log");
-                _diagCapturePath = Path.Combine(workDir, "overlay-diag-capture.png");
-            }
-            catch { }
-        }
-
-        internal static void ResetDiagFiles()
-        {
-            try
-            {
-                if (!string.IsNullOrEmpty(_diagLogPath)) File.WriteAllText(_diagLogPath, string.Empty, Encoding.UTF8);
-                if (!string.IsNullOrEmpty(_diagCapturePath) && File.Exists(_diagCapturePath)) File.Delete(_diagCapturePath);
-            }
-            catch { }
+            if (options == Diagnostics.None) return;
+            if ((options & Diagnostics.Log) != 0) _diagLogPath = "overlay-diag.log";
+            if ((options & Diagnostics.Capture) != 0)
+                _diagCapturePath = Path.Combine(DiagnosticDirectory(), "overlay-diag-capture.png");
         }
 
         internal static void LogDiag(string msg)
         {
-            if (string.IsNullOrEmpty(_diagLogPath)) return;
-            string line = DateTime.Now.ToString("HH:mm:ss.fff") + " " + msg + Environment.NewLine;
+            if (_diagLogPath != null) WriteDiagnostic(_diagLogPath, msg);
+        }
+
+        private static void WriteDiagnostic(string name, string msg)
+        {
+            string line = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + " " + msg + Environment.NewLine;
             lock (DiagLock)
             {
-                try { File.AppendAllText(_diagLogPath, line, Encoding.UTF8); }
-                catch { }
+                try
+                {
+                    string dir = DiagnosticDirectory();
+                    Directory.CreateDirectory(dir);
+                    File.AppendAllText(Path.Combine(dir, name), line, new UTF8Encoding(false));
+                }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
             }
         }
 
@@ -691,17 +652,18 @@ namespace CodexInputUsage
                 var screen = Screen.FromPoint(area.Location).Bounds;
                 var crop = Rectangle.Intersect(screen, Rectangle.Inflate(area, 40, 28));
                 if (crop.Width <= 0 || crop.Height <= 0) return;
+                Directory.CreateDirectory(DiagnosticDirectory());
                 using (var bmp = new Bitmap(crop.Width, crop.Height, PixelFormat.Format32bppArgb))
                 {
                     using (var g = Graphics.FromImage(bmp))
                         g.CopyFromScreen(crop.Location, Point.Empty, crop.Size, CopyPixelOperation.SourceCopy);
                     bmp.Save(_diagCapturePath, ImageFormat.Png);
                 }
-                LogDiag("captured docked strip region to " + _diagCapturePath + " crop=" + crop);
+                LogDiag("captured docked strip region crop=" + crop);
             }
             catch (Exception ex)
             {
-                LogDiag("capture failed: " + ex.Message);
+                LogDiag("capture failed: " + ex.GetType().Name);
             }
         }
 
@@ -1027,16 +989,22 @@ namespace CodexInputUsage
             private void SyncAutoStartMenuState()
             {
                 bool enabled = CodexCompanionManager.IsEnabled();
-                _strip.SetAutoStartChecked(enabled);
+                string problem = enabled ? null : CodexCompanionManager.EnableProblem();
+                string label = "跟随原生 Codex 自动启动" + (problem == null ? "" : "（" + problem + "）");
+                _strip.SetAutoStartState(enabled, problem == null, label);
                 _trayAutoStartItem.Checked = enabled;
+                _trayAutoStartItem.Enabled = problem == null;
+                _trayAutoStartItem.Text = label;
             }
 
             private void OnAutoStartToggled(object sender, EventArgs e)
             {
                 bool target = !CodexCompanionManager.IsEnabled();
-                CodexCompanionManager.SetEnabled(target);
+                bool updated = CodexCompanionManager.SetEnabled(target);
                 SyncAutoStartMenuState();
-                Program.LogDiag("codex companion auto-launch toggled -> " + CodexCompanionManager.IsEnabled());
+                if (!updated)
+                    _trayIcon.ShowBalloonTip(3000, "Codex InputUsage", "自动启动设置未能保存。", ToolTipIcon.Warning);
+                Program.LogDiag("codex companion config " + (updated ? (target ? "enabled" : "disabled") : "write-failed"));
             }
 
             private void OnStripClicked(object sender, EventArgs e)
@@ -1066,6 +1034,7 @@ namespace CodexInputUsage
                 WatchRolloutFile(null);
                 if (_ipc.IsRunning) _ipc.Stop();
                 _dockTracker.SetSessionBound(false);
+                _matcher.ClearCorpusCache();
                 _metricsWindowHandle = IntPtr.Zero;
                 _rollout.Reset(null, "等待", null);
                 _lastMetrics = _rollout.BuildSnapshot();
@@ -1142,7 +1111,7 @@ namespace CodexInputUsage
 
                 if (fgCodex == IntPtr.Zero)
                 {
-                    LogState("hidden:" + (nonMatch ?? "not-codex"));
+                    LogState("hidden:" + (nonMatch ?? "not-codex").Split('=')[0].Split(' ')[0]);
                     _strip.HideStrip();
                     if (_popover.Visible) _popover.Hide();
                     _popoverWanted = false;
@@ -1242,9 +1211,8 @@ namespace CodexInputUsage
                 _anchorStripBounds = placed;
                 _anchorDpiScale = effectiveDock.DpiScale;
 
-                LogState(string.Format("docked:{0} bounds={1} text=\"{2}\" thread={3}({4}) match=[{5}]",
-                    effectiveDock.Source, placed, variant, MetricFormatter.ShortThreadId(_lastMetrics.ThreadId),
-                    _lastMetrics.BindingSource, _lastMatchDetail),
+                LogState(string.Format("docked:{0} bounds={1} source={2} match=[{3}]",
+                    effectiveDock.Source, placed, _lastMetrics.BindingSource, _lastMatchDetail),
                     string.Format(" geometryMs={0} fpMs={1}", effectiveDock.GeometryMs, effectiveDock.FingerprintMs));
 
                 if (_popoverWanted)
@@ -1255,7 +1223,7 @@ namespace CodexInputUsage
                     if (!_popover.Visible) _popover.Show();
                 }
 
-                if (!_capturedOnce && _strip.IsHandleCreated && NativeWin32.IsWindowVisible(_strip.Handle))
+                if (_diagCapturePath != null && !_capturedOnce && _strip.IsHandleCreated && NativeWin32.IsWindowVisible(_strip.Handle))
                 {
                     _capturedOnce = true;
                     Program.CaptureRegionOnce(placed);
